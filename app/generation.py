@@ -5,7 +5,8 @@ from datetime import datetime
 
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import session_factory
 from app.ledger import InsufficientTokens, locked_user, record_movement
@@ -180,46 +181,54 @@ async def task_status(task_id: uuid.UUID) -> TaskResponse:
     """Return the current provider leg and ordered attempt history."""
 
     async with session_factory() as session:
-        task = await session.get(GenerationTask, task_id)
-        if task is None:
-            raise HTTPException(status_code=404, detail="Task not found")
-        model = await session.get(Model, task.model_id)
-        if model is None:
-            raise RuntimeError("Generation task refers to an unknown model")
+        async with session.begin():
+            # Task, model, current leg and attempt history form one logical
+            # response. READ COMMITTED can mix versions across these queries.
+            await session.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ"))
+            return await _read_task_snapshot(session, task_id)
 
-        attempts = (
-            await session.scalars(
-                select(ProviderAttempt)
-                .where(ProviderAttempt.task_id == task_id)
-                .order_by(ProviderAttempt.ordinal)
-            )
-        ).all()
-        history = [
-            AttemptResponse(
-                id=attempt.id,
-                leg_id=attempt.leg_id,
-                provider=attempt.provider,
-                ordinal=attempt.ordinal,
-                status=attempt.status,
-                external_id=attempt.external_id,
-                error_type=attempt.error_type,
-                deadline_at=attempt.deadline_at,
-                finished_at=attempt.finished_at,
-            )
-            for attempt in attempts
-        ]
-        current = next(
-            (attempt for attempt in history if attempt.id == task.current_attempt_id),
-            None,
+
+async def _read_task_snapshot(session: AsyncSession, task_id: uuid.UUID) -> TaskResponse:
+    task = await session.get(GenerationTask, task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+    model = await session.get(Model, task.model_id)
+    if model is None:
+        raise RuntimeError("Generation task refers to an unknown model")
+
+    attempts = (
+        await session.scalars(
+            select(ProviderAttempt)
+            .where(ProviderAttempt.task_id == task_id)
+            .order_by(ProviderAttempt.ordinal)
         )
-        return TaskResponse(
-            task_id=task.id,
-            user_id=task.user_id,
-            model_slug=model.slug,
-            status=task.status,
-            price=task.price,
-            result_url=task.result_url,
-            current_leg=current,
-            attempts=history,
-            created_at=task.created_at,
+    ).all()
+    history = [
+        AttemptResponse(
+            id=attempt.id,
+            leg_id=attempt.leg_id,
+            provider=attempt.provider,
+            ordinal=attempt.ordinal,
+            status=attempt.status,
+            external_id=attempt.external_id,
+            error_type=attempt.error_type,
+            deadline_at=attempt.deadline_at,
+            finished_at=attempt.finished_at,
         )
+        for attempt in attempts
+    ]
+    current = next(
+        (attempt for attempt in history if attempt.id == task.current_attempt_id),
+        None,
+    )
+    return TaskResponse(
+        task_id=task.id,
+        user_id=task.user_id,
+        model_slug=model.slug,
+        status=task.status,
+        price=task.price,
+        result_url=task.result_url,
+        current_leg=current,
+        attempts=history,
+        created_at=task.created_at,
+    )
