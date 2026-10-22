@@ -1,6 +1,6 @@
 # Integer generation service
 
-**Status: stage 4 — provider simulator, signed callbacks, failover, and outbox worker added. Watchdog/reconciliation remain unfinished. Not ready for submission.**
+**Status: stage 5 — provider watchdog, late-webhook protection and fenced outbox leases added. Awaiting PostgreSQL integration verification; not ready for submission.**
 
 ## Quick start
 
@@ -73,7 +73,7 @@ The Docker integration tests cover 20 simultaneous identical payments, 12 differ
 2. Signed payment webhook and concurrency-safe ledger (**done**).\n2.5. Frozen migration, shared ledger and isolated DB tests (**done; 10 integration tests passed**).
 3. Generation API and transactional debit (**implemented; awaiting integration verification**).
 4. Provider routing and callbacks (**implemented; local verification required**).
-5. Watchdog, timeout recovery, and once-only refunds.
+5. Watchdog, timeout recovery, and once-only refunds (**implemented; awaiting verification**).
 6. Comprehensive multi-worker race/crash tests.
 7. Code review and documentation.
 
@@ -104,4 +104,17 @@ Provider callbacks sign the **unmodified JSON bytes** with `PROVIDER_WEBHOOK_SEC
 
 The new integration tests cover successful delivery with simultaneous duplicate callbacks, technical failover to the next provider with ignored late results, and ten simultaneous final-failure callbacks resulting in exactly one refund. **These new tests and the linters still need to run in the user's Docker/local environment.**
 
-Caveats: the worker uses a leased outbox event, but dispatch-after-crash may be attempted again, requiring provider-side idempotency. The fake provider uses FastAPI BackgroundTasks, not durable job storage, and its scheduled callback can disappear on a provider process restart. The stage-five watchdog will resolve attempts that have received no callback, along with late results after timeout. The initial lease timeout and dispatch retry behavior will also be hardened and tested there.
+Caveats: the worker uses a leased outbox event, but dispatch-after-crash may be attempted again, requiring provider-side idempotency. The fake provider uses FastAPI BackgroundTasks, not durable job storage, and its scheduled callback can disappear on a provider process restart. The watchdog now expires attempts that have passed their stored deadline, tries the next eligible leg, or marks the task failed with an exactly-once ledger refund. Outbox acknowledgements are fenced by the claimed lease deadline; a stale worker cannot complete a lease claimed by another worker. Full process-crash and four-worker end-to-end verification are still outstanding.
+
+
+## Watchdog and outbox fencing (stage 5; pending integration verification)
+
+`app.watchdog.watchdog_once()` scans attempts with status `sending`/`waiting` and an expired `deadline_at`, provided the attempt is still the task's current attempt. Each candidate is rechecked **inside the same user → task → attempt row-lock order as provider webhooks**, after the locks are acquired, before a transition is applied. Therefore concurrent watchdog processes cannot independently advance the same attempt or return its price twice. When all provider legs fail or expire, the original debit is reversed using the unique `refund:{task_id}` ledger key in the same transaction as terminal failure.
+
+A provider completion that arrives **after the task is terminal or its attempt is superseded** is ignored. An already-arrived successful result that wins the row lock before watchdog processing may complete normally even if its deadline has just elapsed; the scan does not retroactively undo completed work. A technical timeout allows the next compatible leg.
+
+The worker now scans for expired attempts periodically (`WATCHDOG_INTERVAL_SECONDS`, default 2), as well as dispatching outbox events. Claims use `FOR UPDATE SKIP LOCKED` with a timestamp lease; the claim's expiration timestamp is passed to `finish_outbox()` as an ownership token. Old workers cannot mark events done when the lease has been renewed by a different worker. Retried dispatches retain their original provider deadline, and already-waiting attempts are not resent by ordinary outbox replay.
+
+The simulator's `late_success` and `no_webhook` modes support manual end-to-end testing. Stage-five tests cover first-leg timeout → second-leg success, concurrent watchdog scans exhausting both legs → exactly one refund, ignoring a late completed callback after refund, and rejection of a stale outbox acknowledgement.
+
+**Limitations:** provider submission is at-least-once on ambiguous transport failure. The fake provider is not durable across a process restart; its stable external ID is necessary but does not by itself make simulated submission fully idempotent. Four independent Uvicorn-worker networking and actual process-kill/restart tests remain stage six.
