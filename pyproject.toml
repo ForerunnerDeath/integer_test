@@ -1,0 +1,10 @@
+[project]
+name = "integer-generation-service"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = ["fastapi>=0.115,<1","uvicorn[standard]>=0.30,<1","sqlalchemy[asyncio]>=2,<3","asyncpg>=0.29,<1","alembic>=1.13,<2","pydantic-settings>=2,<3","httpx>=0.27,<1"]
+[project.optional-dependencies]
+dev = ["pytest>=8,<10","pytest-asyncio>=0.24,<2","ruff>=0.8,<1","pyright>=1.1,<2"]
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
