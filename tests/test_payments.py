@@ -86,7 +86,10 @@ async def test_different_payments_do_not_lose_concurrent_credits() -> None:
     requests = [signed_body(payment(user_id, tokens=7)) for _ in range(12)]
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         responses = await asyncio.gather(
-            *(client.post("/webhooks/payments", content=body, headers=headers) for body, headers in requests)
+            *(
+                client.post("/webhooks/payments", content=body, headers=headers)
+                for body, headers in requests
+            )
         )
         assert all(response.status_code == 200 for response in responses), [
             (response.status_code, response.text) for response in responses
