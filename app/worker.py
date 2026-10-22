@@ -72,7 +72,11 @@ async def dispatch_attempt(attempt_id: uuid.UUID, client: httpx.AsyncClient) -> 
             if (
                 task.current_attempt_id != attempt.id
                 or task.status in (TaskStatus.completed, TaskStatus.failed)
-                or attempt.status in (AttemptStatus.completed, AttemptStatus.failed)
+                or attempt.status in (
+                    AttemptStatus.waiting,
+                    AttemptStatus.completed,
+                    AttemptStatus.failed,
+                )
             ):
                 return
             model = await session.get(Model, task.model_id)
@@ -80,7 +84,10 @@ async def dispatch_attempt(attempt_id: uuid.UUID, client: httpx.AsyncClient) -> 
                 raise ValueError("Dispatch refers to a missing model")
             attempt.status = AttemptStatus.sending
             attempt.external_id = str(attempt.id)
-            attempt.deadline_at = datetime.now(UTC) + timedelta(seconds=settings.provider_timeout)
+            if attempt.deadline_at is None:
+                attempt.deadline_at = datetime.now(UTC) + timedelta(
+                    seconds=settings.provider_timeout
+                )
             task.status = TaskStatus.processing
             base_url = settings.alpha_url if attempt.provider == "alpha" else settings.beta_url
             url = f"{base_url}/tasks"
