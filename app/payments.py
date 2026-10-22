@@ -81,7 +81,8 @@ async def credit_payment(event: PaymentWebhook) -> PaymentOutcome:
 
             try:
                 await record_movement(
-                    session, user,
+                    session,
+                    user,
                     operation_key=operation_key,
                     kind=LedgerKind.credit,
                     amount=event.tokens,
