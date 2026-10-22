@@ -6,17 +6,35 @@ import hmac
 import json
 import os
 import uuid
+from collections.abc import AsyncIterator
 
 import pytest
+import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 
 from app.config import settings
+from app.db import engine
 from app.main import app
 
 pytestmark = pytest.mark.skipif(
     os.getenv("RUN_DB_TESTS") != "1",
     reason="Requires PostgreSQL: docker compose run --build --rm tests",
 )
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def dispose_db_pool_after_test() -> AsyncIterator[None]:
+    """An asyncpg connection belongs to its originating event loop.
+
+    pytest-asyncio starts a new loop for each test. SQLAlchemy's module-level
+    engine otherwise pools connections that were created in the previous loop.
+    Dispose the test pool before that loop is closed, without changing the
+    production app's pooling strategy.
+    """
+    try:
+        yield
+    finally:
+        await engine.dispose()
 
 
 def signed_body(payload: dict[str, object]) -> tuple[bytes, dict[str, str]]:
