@@ -67,9 +67,7 @@ async def test_timeout_fallback_then_late_alpha_success_is_ignored() -> None:
             "result_url": "https://example.invalid/too-late",
         }
         raw, headers = signed_provider(late)
-        ignored = await client.post(
-            "/webhooks/providers/alpha", content=raw, headers=headers
-        )
+        ignored = await client.post("/webhooks/providers/alpha", content=raw, headers=headers)
         assert ignored.status_code == 200
         assert ignored.json()["outcome"] == "ignored"
 
@@ -114,9 +112,7 @@ async def test_parallel_watchdogs_refund_once_and_reject_late_success() -> None:
             "result_url": "https://example.invalid/after-refund",
         }
         raw, headers = signed_provider(late)
-        ignored = await client.post(
-            "/webhooks/providers/beta", content=raw, headers=headers
-        )
+        ignored = await client.post("/webhooks/providers/beta", content=raw, headers=headers)
         assert ignored.status_code == 200
         assert ignored.json()["outcome"] == "ignored"
         final = (await client.get(f"/tasks/{task_id}")).json()
@@ -128,9 +124,7 @@ async def test_parallel_watchdogs_refund_once_and_reject_late_success() -> None:
     async with session_factory() as session:
         entries = (
             await session.scalars(
-                select(LedgerEntry).where(
-                    LedgerEntry.operation_key == f"refund:{task_id}"
-                )
+                select(LedgerEntry).where(LedgerEntry.operation_key == f"refund:{task_id}")
             )
         ).all()
     assert len(entries) == 1

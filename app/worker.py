@@ -72,7 +72,8 @@ async def dispatch_attempt(attempt_id: uuid.UUID, client: httpx.AsyncClient) -> 
             if (
                 task.current_attempt_id != attempt.id
                 or task.status in (TaskStatus.completed, TaskStatus.failed)
-                or attempt.status in (
+                or attempt.status
+                in (
                     AttemptStatus.waiting,
                     AttemptStatus.completed,
                     AttemptStatus.failed,
@@ -156,11 +157,7 @@ async def finish_outbox(
     async with session_factory() as session:
         async with session.begin():
             event = await session.get(OutboxEvent, event_id, with_for_update=True)
-            if (
-                event is None
-                or event.done_at is not None
-                or event.claimed_until != lease_until
-            ):
+            if event is None or event.done_at is not None or event.claimed_until != lease_until:
                 return
             event.claimed_until = None
             if success:
