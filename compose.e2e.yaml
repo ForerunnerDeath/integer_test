@@ -1,0 +1,65 @@
+# Isolated end-to-end stack: docker compose -f compose.e2e.yaml -p integer-e2e up
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: integer
+      POSTGRES_PASSWORD: integer
+      POSTGRES_DB: integer_e2e
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U integer -d integer_e2e"]
+      interval: 2s
+      retries: 30
+    tmpfs: ["/var/lib/postgresql/data"]
+  migrate:
+    build: .
+    environment: &common
+      DATABASE_URL: postgresql+asyncpg://integer:integer@db:5432/integer_e2e
+      PROVIDER_WEBHOOK_SECRET: e2e-provider-secret
+      PAYMENT_WEBHOOK_SECRET: e2e-payment-secret
+      PROVIDER_TIMEOUT: "4"
+      WATCHDOG_INTERVAL_SECONDS: "0.5"
+      OUTBOX_LEASE_SECONDS: "2"
+      ALPHA_URL: http://alpha:8000
+      BETA_URL: http://beta:8000
+    depends_on:
+      db:
+        condition: service_healthy
+    command: ["alembic", "upgrade", "head"]
+  api:
+    build: .
+    environment: *common
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    ports: ["127.0.0.1:18000:8000"]
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "4"]
+  worker:
+    build: .
+    environment: *common
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    command: ["python", "-m", "app.worker"]
+  alpha:
+    build: .
+    environment:
+      <<: *common
+      PROVIDER_NAME: alpha
+      PROVIDER_CALLBACK_BASE: http://api:8000
+      FAKE_PROVIDER_TEST_CONTROL: "1"
+      FAKE_PROVIDER_MODE: success
+      FAKE_PROVIDER_DELAY: "0.1"
+    ports: ["127.0.0.1:18101:8000"]
+    command: ["uvicorn", "app.fake_provider:app", "--host", "0.0.0.0", "--port", "8000"]
+  beta:
+    build: .
+    environment:
+      <<: *common
+      PROVIDER_NAME: beta
+      PROVIDER_CALLBACK_BASE: http://api:8000
+      FAKE_PROVIDER_TEST_CONTROL: "1"
+      FAKE_PROVIDER_MODE: success
+      FAKE_PROVIDER_DELAY: "0.1"
+    ports: ["127.0.0.1:18102:8000"]
+    command: ["uvicorn", "app.fake_provider:app", "--host", "0.0.0.0", "--port", "8000"]
