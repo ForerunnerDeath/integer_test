@@ -3,7 +3,7 @@
 import asyncio
 import logging
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import httpx
 from sqlalchemy import func, or_, select
@@ -43,9 +43,7 @@ async def claim_outbox() -> uuid.UUID | None:
             )
             if event is None:
                 return None
-            event.claimed_until = datetime.now(timezone.utc) + timedelta(
-                seconds=LEASE_SECONDS
-            )
+            event.claimed_until = datetime.now(UTC) + timedelta(seconds=LEASE_SECONDS)
             event.retries += 1
             return event.id
 
@@ -60,16 +58,12 @@ async def dispatch_attempt(attempt_id: uuid.UUID, client: httpx.AsyncClient) -> 
             if relation is None:
                 raise ValueError("Dispatch refers to a missing attempt")
             task = await session.scalar(
-                select(GenerationTask)
-                .where(GenerationTask.id == relation)
-                .with_for_update()
+                select(GenerationTask).where(GenerationTask.id == relation).with_for_update()
             )
             if task is None:
                 raise ValueError("Dispatch refers to a missing task")
             attempt = await session.scalar(
-                select(ProviderAttempt)
-                .where(ProviderAttempt.id == attempt_id)
-                .with_for_update()
+                select(ProviderAttempt).where(ProviderAttempt.id == attempt_id).with_for_update()
             )
             if attempt is None:
                 raise ValueError("Dispatch refers to a missing attempt")
@@ -84,7 +78,7 @@ async def dispatch_attempt(attempt_id: uuid.UUID, client: httpx.AsyncClient) -> 
                 raise ValueError("Dispatch refers to a missing model")
             attempt.status = AttemptStatus.sending
             attempt.external_id = str(attempt.id)
-            attempt.deadline_at = datetime.now(timezone.utc) + timedelta(
+            attempt.deadline_at = datetime.now(UTC) + timedelta(
                 seconds=settings.provider_timeout
             )
             task.status = TaskStatus.processing
@@ -157,9 +151,9 @@ async def finish_outbox(event_id: uuid.UUID, *, success: bool) -> None:
                 return
             event.claimed_until = None
             if success:
-                event.done_at = datetime.now(timezone.utc)
+                event.done_at = datetime.now(UTC)
             else:
-                event.available_at = datetime.now(timezone.utc) + timedelta(seconds=3)
+                event.available_at = datetime.now(UTC) + timedelta(seconds=3)
 
 
 async def process_one(client: httpx.AsyncClient) -> bool:
