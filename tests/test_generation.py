@@ -1,18 +1,32 @@
 """Generation admission and financial invariants on real PostgreSQL."""
 
 import asyncio
+import os
 import uuid
+from collections.abc import AsyncIterator
 
 import pytest
+import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import func, select
 
-from app.db import session_factory
+from app.db import engine, session_factory
 from app.main import app
 from app.models import GenerationTask, LedgerEntry, OutboxEvent, ProviderAttempt, User
 from test_payments import payment, signed_body
 
-pytestmark = pytest.mark.usefixtures("dispose_db_pool_after_test")
+pytestmark = pytest.mark.skipif(
+    os.getenv("RUN_DB_TESTS") != "1",
+    reason="Requires PostgreSQL: docker compose run --build --rm tests",
+)
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def dispose_db_pool_after_generation_test() -> AsyncIterator[None]:
+    try:
+        yield
+    finally:
+        await engine.dispose()
 
 
 async def fund(client: AsyncClient, user_id: str, tokens: int) -> None:
