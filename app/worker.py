@@ -78,9 +78,7 @@ async def dispatch_attempt(attempt_id: uuid.UUID, client: httpx.AsyncClient) -> 
                 raise ValueError("Dispatch refers to a missing model")
             attempt.status = AttemptStatus.sending
             attempt.external_id = str(attempt.id)
-            attempt.deadline_at = datetime.now(UTC) + timedelta(
-                seconds=settings.provider_timeout
-            )
+            attempt.deadline_at = datetime.now(UTC) + timedelta(seconds=settings.provider_timeout)
             task.status = TaskStatus.processing
             base_url = settings.alpha_url if attempt.provider == "alpha" else settings.beta_url
             url = f"{base_url}/tasks"
@@ -130,14 +128,10 @@ async def dispatch_attempt(attempt_id: uuid.UUID, client: httpx.AsyncClient) -> 
             if relation is None:
                 return
             await session.scalar(
-                select(GenerationTask)
-                .where(GenerationTask.id == relation)
-                .with_for_update()
+                select(GenerationTask).where(GenerationTask.id == relation).with_for_update()
             )
             attempt = await session.scalar(
-                select(ProviderAttempt)
-                .where(ProviderAttempt.id == attempt_id)
-                .with_for_update()
+                select(ProviderAttempt).where(ProviderAttempt.id == attempt_id).with_for_update()
             )
             if attempt is not None and attempt.status == AttemptStatus.sending:
                 attempt.status = AttemptStatus.waiting
