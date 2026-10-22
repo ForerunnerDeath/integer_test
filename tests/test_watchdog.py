@@ -2,21 +2,35 @@
 
 import asyncio
 import uuid
+import os
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 
 import pytest
+import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
+from test_generation import fund
+from test_provider_flow import dispatch_and_capture, generate, signed_provider
 
-from app.db import session_factory
+from app.db import engine, session_factory
 from app.main import app
 from app.models import LedgerEntry, OutboxEvent, ProviderAttempt, TaskStatus
 from app.watchdog import watchdog_once
 from app.worker import claim_outbox, finish_outbox
-from test_generation import fund
-from test_provider_flow import dispatch_and_capture, generate, signed_provider
 
-pytestmark = pytest.mark.usefixtures("dispose_db_pool_after_provider_test")
+pytestmark = pytest.mark.skipif(
+    os.getenv("RUN_DB_TESTS") != "1",
+    reason="Requires PostgreSQL: docker compose run --build --rm tests",
+)
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def dispose_db_pool_after_watchdog_test() -> AsyncIterator[None]:
+    try:
+        yield
+    finally:
+        await engine.dispose()
 
 
 async def set_attempt_deadline(attempt_id: str, seconds_ago: int = 5) -> None:
