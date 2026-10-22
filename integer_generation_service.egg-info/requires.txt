@@ -1,0 +1,13 @@
+fastapi<1,>=0.115
+uvicorn[standard]<1,>=0.30
+sqlalchemy[asyncio]<3,>=2
+asyncpg<1,>=0.29
+alembic<2,>=1.13
+pydantic-settings<3,>=2
+httpx<1,>=0.27
+
+[dev]
+pytest<10,>=8
+pytest-asyncio<2,>=0.24
+ruff<1,>=0.8
+pyright<2,>=1.1
