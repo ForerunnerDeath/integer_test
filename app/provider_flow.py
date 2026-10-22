@@ -1,7 +1,7 @@
 """Signed provider callbacks, failover and once-only final refunds."""
 
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Request
@@ -96,7 +96,7 @@ async def transition_attempt(
             if attempt.external_id != callback.external_id:
                 raise HTTPException(status_code=409, detail="Provider task ID mismatch")
 
-            attempt.finished_at = datetime.now(timezone.utc)
+            attempt.finished_at = datetime.now(UTC)
             if callback.status == "completed":
                 attempt.status = AttemptStatus.completed
                 task.status = TaskStatus.completed
