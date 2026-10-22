@@ -97,7 +97,8 @@ async def dispatch_attempt(
             if model is None:
                 raise ValueError("Dispatch refers to a missing model")
             attempt.status = AttemptStatus.sending
-            attempt.external_id = str(attempt.id)
+            if attempt.external_id is None:
+                attempt.external_id = str(attempt.id)
             if attempt.deadline_at is None:
                 attempt.deadline_at = datetime.now(UTC) + timedelta(
                     seconds=settings.provider_timeout
@@ -117,6 +118,7 @@ async def dispatch_attempt(
             task_id = task.id
 
     failure: str | None = None
+    accepted_id: str | None = None
     try:
         response = await client.post(url, json=body, timeout=10)
         if response.status_code == 400:
@@ -125,8 +127,12 @@ async def dispatch_attempt(
             failure = "moderation"
         elif response.status_code != 202:
             failure = "technical"
-        elif response.json().get("external_id") != external_id:
-            failure = "technical"
+        else:
+            returned_id = response.json().get("external_id")
+            if not isinstance(returned_id, str) or not 0 < len(returned_id) <= 160:
+                failure = "technical"
+            else:
+                accepted_id = returned_id
     except (httpx.RequestError, ValueError, TypeError):
         failure = "technical"
 
@@ -169,6 +175,14 @@ async def dispatch_attempt(
                         or event.payload.get("attempt_id") != str(attempt.id)
                     ):
                         return
+                # A signed callback may already have bound a provider-issued ID.
+                if (
+                    accepted_id is not None
+                    and attempt.external_id not in (str(attempt.id), accepted_id)
+                ):
+                    return
+                if accepted_id is not None:
+                    attempt.external_id = accepted_id
                 attempt.status = AttemptStatus.waiting
 
 
