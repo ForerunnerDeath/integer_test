@@ -6,12 +6,13 @@ from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field, ValidationError
+from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.config import settings
 from app.db import session_factory
-from app.ledger import BalanceOverflow, locked_user, record_movement
-from app.models import LedgerKind, Payment, User
+from app.ledger import MAX_BALANCE, BalanceOverflow, locked_user, record_movement
+from app.models import GenerationTask, LedgerKind, Payment, TaskStatus, User
 from app.security import verify_webhook_signature
 
 router = APIRouter(tags=["payments"])
@@ -78,6 +79,21 @@ async def credit_payment(event: PaymentWebhook) -> PaymentOutcome:
                         detail="Payment ID was previously used for different details",
                     )
                 return "duplicate"
+
+            # Each active generation is a possible future refund. The user
+            # row lock serializes credits with admission and terminal callbacks,
+            # so this liability sum is stable until the transaction commits.
+            pending_refunds = await session.scalar(
+                select(func.coalesce(func.sum(GenerationTask.price), 0)).where(
+                    GenerationTask.user_id == user.id,
+                    GenerationTask.status.in_((TaskStatus.pending, TaskStatus.processing)),
+                )
+            )
+            if user.balance + int(pending_refunds or 0) + event.tokens > MAX_BALANCE:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Payment would exceed balance capacity including pending refunds",
+                )
 
             try:
                 await record_movement(
