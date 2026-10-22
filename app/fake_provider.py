@@ -51,9 +51,7 @@ async def send_webhook(data: FakeTaskRequest, external_id: str, mode: str) -> No
         message["error_type"] = mode
         message.pop("result_url", None)
     raw = json.dumps(message, separators=(",", ":")).encode()
-    signature = hmac.new(
-        settings.provider_webhook_secret.encode(), raw, hashlib.sha256
-    ).hexdigest()
+    signature = hmac.new(settings.provider_webhook_secret.encode(), raw, hashlib.sha256).hexdigest()
     url = f"{CALLBACK_BASE}/webhooks/providers/{PROVIDER_NAME}"
     async with httpx.AsyncClient(timeout=10) as client:
         requests = 2 if mode == "duplicate" else 1
