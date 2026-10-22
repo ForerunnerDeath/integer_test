@@ -1,6 +1,7 @@
 import enum
 import uuid
 from datetime import datetime
+from typing import Any
 
 from sqlalchemy import (
     JSON,
@@ -112,7 +113,7 @@ class GenerationTask(Base):
     user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), nullable=False)
     model_id: Mapped[int] = mapped_column(ForeignKey("models.id"), nullable=False)
     prompt: Mapped[str] = mapped_column(Text, nullable=False)
-    ref_images: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    ref_images: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
     price: Mapped[int] = mapped_column(Integer, nullable=False)
     status: Mapped[TaskStatus] = mapped_column(
         Enum(TaskStatus), nullable=False, default=TaskStatus.pending
