@@ -204,9 +204,7 @@ async def process_one(client: httpx.AsyncClient) -> bool:
             if event.topic != "dispatch_attempt":
                 raise ValueError(f"Unsupported outbox topic: {event.topic}")
             attempt_id = uuid.UUID(str(event.payload["attempt_id"]))
-        await dispatch_attempt(
-            attempt_id, client, dispatch_lease=(event_id, lease_until)
-        )
+        await dispatch_attempt(attempt_id, client, dispatch_lease=(event_id, lease_until))
     except Exception:
         log.exception("Outbox dispatch failed for %s", event_id)
         await finish_outbox(event_id, lease_until, success=False)
