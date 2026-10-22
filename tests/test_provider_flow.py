@@ -6,20 +6,20 @@ import hmac
 import json
 import os
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 
 import httpx
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
+from test_generation import fund
 
 from app.config import settings
 from app.db import engine, session_factory
 from app.main import app
 from app.models import GenerationTask, LedgerEntry, LedgerKind, TaskStatus
 from app.worker import dispatch_attempt
-from test_generation import fund
 
 pytestmark = pytest.mark.skipif(
     os.getenv("RUN_DB_TESTS") != "1",
@@ -35,11 +35,9 @@ async def dispose_db_pool_after_provider_test() -> AsyncIterator[None]:
         await engine.dispose()
 
 
-def signed_provider(data: dict[str, object]) -> tuple[bytes, dict[str, str]]:
+def signed_provider(data: Mapping[str, object]) -> tuple[bytes, dict[str, str]]:
     raw = json.dumps(data, separators=(",", ":")).encode()
-    sig = hmac.new(
-        settings.provider_webhook_secret.encode(), raw, hashlib.sha256
-    ).hexdigest()
+    sig = hmac.new(settings.provider_webhook_secret.encode(), raw, hashlib.sha256).hexdigest()
     return raw, {"X-Signature": sig}
 
 
@@ -149,7 +147,8 @@ async def test_parallel_final_failures_refund_exactly_once() -> None:
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         await fund(client, user_id, 30)
         task_id = await generate(client, user_id)
-        first = await dispatch_and_capture()
+        first_state = (await client.get(f"/tasks/{task_id}")).json()
+        first = await dispatch_and_capture(first_state["current_leg"]["id"])
         fail = {
             "task_id": task_id,
             "attempt_id": first["attempt_id"],
@@ -160,7 +159,8 @@ async def test_parallel_final_failures_refund_exactly_once() -> None:
         raw, headers = signed_provider(fail)
         result = await client.post("/webhooks/providers/alpha", content=raw, headers=headers)
         assert result.json()["outcome"] == "advanced"
-        second = await dispatch_and_capture()
+        second_state = (await client.get(f"/tasks/{task_id}")).json()
+        second = await dispatch_and_capture(second_state["current_leg"]["id"])
         final = {**fail, "attempt_id": second["attempt_id"], "external_id": second["attempt_id"]}
         raw, headers = signed_provider(final)
         responses = await asyncio.gather(
