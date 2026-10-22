@@ -99,6 +99,7 @@ async def dispatch_attempt(attempt_id: uuid.UUID, client: httpx.AsyncClient) -> 
             }
             provider = attempt.provider
             external_id = str(attempt.id)
+            task_id = task.id
 
     failure: str | None = None
     try:
@@ -117,7 +118,7 @@ async def dispatch_attempt(attempt_id: uuid.UUID, client: httpx.AsyncClient) -> 
     if failure is not None:
         await transition_attempt(
             ProviderWebhook(
-                task_id=uuid.UUID(body["task_id"]),
+                task_id=task_id,
                 attempt_id=attempt_id,
                 external_id=external_id,
                 status="failed",
