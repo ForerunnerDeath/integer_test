@@ -1,25 +1,105 @@
 # Integer — Generation Service
 
-Асинхронный сервис генерации на Python 3.12, FastAPI, PostgreSQL и SQLAlchemy.
-Поддерживает четыре Uvicorn API-процесса, двух фейковых провайдеров (Alpha/Beta),
-платёжные вебхуки, дебет/возврат токенов, журнал операций, failover и watchdog.
+Асинхронный сервис генерации на **Python 3.12 / FastAPI / PostgreSQL / SQLAlchemy**.
+Принимает оплату токенами, создаёт задачи, отправляет их провайдерам Alpha/Beta,
+обрабатывает webhook-результаты, выполняет failover и возвращает токены при ошибках.
+Рассчитан на **4 API-процесса** и отдельный фоновый worker; состояние хранится в PostgreSQL.
 
-## Запуск
+## Архитектура
+
+```mermaid
+flowchart TB
+    Client["Клиент / платёжный webhook"] --> API["FastAPI × 4"]
+    API <-->|"Задачи, платежи, ledger, outbox"| DB[("PostgreSQL")]
+    Worker["Worker: outbox + watchdog"] <-->|"Чтение и транзакционные переходы"| DB
+    Worker -->|"POST /tasks"| Alpha["Fake Provider Alpha"]
+    Worker -->|"POST /tasks"| Beta["Fake Provider Beta"]
+    Alpha -->|"Подписанный webhook"| API
+    Beta -->|"Подписанный webhook"| API
+```
+
+Платёж и списание токенов фиксируются **до внешнего HTTP-запроса**.
+Worker отправляет сохранённое в outbox событие провайдеру; webhook или watchdog
+завершает попытку, переводит задачу на следующую ногу либо делает однократный возврат.
+
+## Быстрый старт
+
+Нужны **Docker Desktop / Docker Compose** и свободные локальные порты `8000` (API)
+и `55432` (PostgreSQL). Все команды ниже рассчитаны на **PowerShell** из корня проекта.
 
 ```powershell
 Copy-Item .env.example .env
 docker compose up --build -d
 ```
 
-Документация API: http://localhost:8000/docs
-Проверка состояния: http://localhost:8000/health
+- Swagger UI: http://localhost:8000/docs
+- Проверка работоспособности: http://localhost:8000/health
+- PostgreSQL и Alembic запускаются автоматически; отдельную регистрацию пользователя делать не нужно.
 
+### Пример: оплата → генерация → статус → баланс
+
+Этот PowerShell-пример использует **только локальный секрет** из `.env.example`.
+Если поменяли `PAYMENT_WEBHOOK_SECRET` в `.env`, укажите его же в `$secret`.
+
+```powershell
+$base = "http://localhost:8000"
+$secret = "dev-payment-secret"
+$userId = [guid]::NewGuid().ToString()
+
+# 1. Формируем JSON и подписываем именно его исходные UTF-8 байты.
+$paymentJson = @{
+    payment_id = [guid]::NewGuid().ToString()
+    user_id    = $userId
+    tokens     = 10
+    status     = "completed"
+} | ConvertTo-Json -Compress
+$body = [System.Text.Encoding]::UTF8.GetBytes($paymentJson)
+$hmac = [System.Security.Cryptography.HMACSHA256]::new(
+    [System.Text.Encoding]::UTF8.GetBytes($secret)
+)
+$signature = ([BitConverter]::ToString($hmac.ComputeHash($body))).Replace("-", "").ToLowerInvariant()
+$hmac.Dispose()
+
+Invoke-RestMethod -Method Post -Uri "$base/webhooks/payments" `
+    -Body $body -ContentType "application/json" -Headers @{ "X-Signature" = $signature }
+
+# 2. Создаём задачу (цена image-fast — 2 токена).
+$requestJson = @{
+    user_id    = $userId
+    model_slug = "image-fast"
+    prompt     = "A cat on the moon"
+    ref_images = @()
+} | ConvertTo-Json -Compress
+$created = Invoke-RestMethod -Method Post -Uri "$base/generate" `
+    -Body $requestJson -ContentType "application/json"
+
+# 3. Ожидаем результат фоновой обработки.
+for ($i = 0; $i -lt 30; $i++) {
+    $task = Invoke-RestMethod -Uri "$base/tasks/$($created.task_id)"
+    if ($task.status -notin @("pending", "processing")) { break }
+    Start-Sleep -Seconds 1
+}
+
+# 4. Проверяем остаток и последние проводки.
+$balance = Invoke-RestMethod -Uri "$base/users/$userId/balance"
+[pscustomobject]@{
+    TaskId  = $created.task_id
+    Status  = $task.status
+    Balance = $balance.balance
+}
+```
+
+При стандартном режиме провайдера `success` ожидаем статус `completed` и баланс
+**8 токенов** (`10 − 2`). Результат асинхронный: сразу после `POST /generate`
+статус может быть `pending` или `processing`.
+
+## API и маршрутизация
 Пользователь создаётся первым успешным платежным вебхуком: отдельного
 endpoint регистрации по заданию нет. Для запросов к вебхукам требуется
 `X-Signature`: hex HMAC-SHA256 **оригинальных байтов JSON** с общим секретом.
 Значения секретов для локальной разработки приведены в `.env.example`.
 
-### API
+### Эндпоинты
 
 | Метод | Путь | Назначение |
 | --- | --- | --- |
@@ -34,7 +114,7 @@ endpoint регистрации по заданию нет. Для запрос�
 Недостаточно токенов: 402. Уже три активные генерации: 429.
 Некорректная подпись вебхука: 401.
 
-### Каталог и маршрутизация
+### Модели и правила failover
 
 | Модель | Цена | Ноги по приоритету |
 | --- | ---: | --- |
@@ -47,7 +127,7 @@ HTTP 5xx или сетевой таймаут переключает на сле
 `skip_on_moderation=True`. Ошибка `payload` завершает задачу немедленно.
 Если ног больше нет, задача переходит в `failed` с возвратом средств.
 
-### Гарантии токенов и однократной обработки
+## Транзакционные гарантии и конкурентность
 
 **Платёж.** Одна транзакция PostgreSQL создаёт пользователя (если нужно),
 блокирует его строку `SELECT FOR UPDATE`, вставляет платёж с уникальным
@@ -96,6 +176,10 @@ watchdog не отменяет успех задним числом. Однов�
 в пределах жизни процесса, но их память не сохраняется после рестарта.
 Строгое «ровно один раз» для удалённого выполнения через HTTP не заявляется.
 
+**Согласованность чтений.** `GET /tasks/{task_id}` формирует статус, текущую ногу
+и историю попыток из одной `REPEATABLE READ` транзакции. Аналогично
+`GET /users/{user_id}/balance` читает баланс и журнал из одного снимка БД.
+
 **Watchdog.** Попытки `sending`/`waiting` с истёкшим `deadline_at`
 обрабатываются теми же транзакционными переходами, что и ошибки вебхука.
 `PROVIDER_TIMEOUT` по умолчанию 60 секунд;
@@ -116,81 +200,83 @@ POST `/tasks` отвечает 202 с `external_id` и позднее отпра
 `/_test/config` и `/_test/jobs/{attempt_id}` разрешены только при
 `FAKE_PROVIDER_TEST_CONTROL=1` в отдельном E2E-контуре.
 
-### Миграции
+## Миграции
 
-Применение: `docker compose run --rm migrate alembic upgrade head`
-(при обычном `docker compose up` сервис `migrate` выполняет этот шаг).
-Исходная `migrations/versions/0001_initial.py` фиксирует DDL и
-стартовые модели. `0002_audit_schema.py` синхронизирует sequence после seed
-и выравнивает обязательность временных меток с ORM. Для нового изменения выполните
-`alembic revision -m "description"`, добавьте явные операции
-`upgrade()`/`downgrade()`, затем `alembic upgrade head`.
-Не редактируйте старую миграцию после развёртывания на реальной базе.
+При `docker compose up` служба `migrate` автоматически применяет `alembic upgrade head`
+до запуска API и worker. Миграция `0001_initial.py` создаёт таблицы и каталог моделей;
+`0002_audit_schema.py` корректирует sequences после seed и выравнивает `NOT NULL`
+у временных меток с ORM. Уже применённую начальную миграцию не редактируем.
 
-### Интеграционные тесты (PostgreSQL)
+Текущая версия схемы и соответствие ORM (после старта контейнеров):
 
 ```powershell
-# Для чистого клона сначала создайте .env:
-Copy-Item .env.example .env
-# Интеграционные тесты в отдельной PostgreSQL:
-docker compose run --build --rm tests
+docker compose exec api alembic current
+docker compose exec api alembic check
+```
 
-# Нативные проверки на Windows, требуется установленный Python 3.12+:
-py -3.12 -m venv .venv
+Для следующего изменения: создать новую ревизию `alembic revision -m "description"`
+из локального окружения разработки, заполнить `upgrade()` / `downgrade()` и применить
+`alembic upgrade head`. Существующие данные не требуют повторного seed.
+## Тесты и статический анализ
+
+Интеграционные тесты выполняются на **отдельной PostgreSQL `test-db`**,
+не затрагивая базу основного сервиса:
+
+```powershell
+docker compose run --build --rm tests
+```
+
+Для Ruff и Pyright нужен Python **3.12+** в `PATH`; локальное окружение можно
+создать с нуля (пример для Windows):
+
+```powershell
+python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -e ".[dev]"
 .\.venv\Scripts\python.exe -m ruff check .
 .\.venv\Scripts\python.exe -m ruff format --check .
 .\.venv\Scripts\python.exe -m pyright
+```
 
-# Или без локального Python: проверки внутри test Docker image:
+Альтернатива без локального Python — проверки в Docker test image:
+
+```powershell
 docker compose run --build --no-deps --rm tests python -m ruff check .
 docker compose run --no-deps --rm tests python -m ruff format --check .
 docker compose run --no-deps --rm tests python -m pyright
-# Для проверки соответствия ORM/миграций требуется работающая БД:
-docker compose run --build --rm test-migrate alembic upgrade head
 ```
 
-Тестовая БД `test-db` отделена от БД разработки.
-Проверяются конкурентные платежи и генерации, двойные callback,
-fallback, возврат единожды, поздний `completed`, таймауты watchdog,
-потерянный lease, синхронные сбои провайдеров, moderation/payload.
+Проверяются конкурентные платежи и списания, ограничение активных задач,
+двойные callback, failover, возвраты, гонки watchdog/worker/lease, пограничные
+значения баланса, целостность снимков API и нестандартные ответы провайдеров.
+## Сетевой E2E
 
-### End-to-end: настоящая сеть, четыре API-процесса, два worker
+E2E проверяет настоящие HTTP-вызовы между контейнерами: **4 API-процесса**,
+два worker, Alpha/Beta и PostgreSQL. Для скрипта нужен локальный Python 3.12+
+и зависимости `.[dev]` (см. раздел выше).
+
+**Важно:** тест рассчитан на пустую базу. Перед повторным запуском удаляем
+контейнеры **только отдельного Compose-проекта `integer-e2e`**.
+Тестовая БД хранится в `tmpfs` и пересоздаётся без влияния на основной сервис.
 
 ```powershell
+docker compose -f compose.e2e.yaml -p integer-e2e down
 docker compose -f compose.e2e.yaml -p integer-e2e up --build -d
 .\.venv\Scripts\python.exe tests/e2e_live.py
 docker compose -f compose.e2e.yaml -p integer-e2e down
 ```
 
-E2E использует **собственную временную БД PostgreSQL** и локальные порты
-`18000` (API), `18101` (alpha), `18102` (beta). Сценарий проверяет
-20 параллельных оплат, success/failover/timeout, сохранение outbox при
-остановке worker, два одновременно запущенных worker, двойные callback
-и контрольный баланс. Для повторного запуска создайте свежий E2E-контур:
-скрипт предполагает пустую базу.
+Используемые локальные порты: `18000` (API), `18101` (Alpha), `18102` (Beta).
+Сценарий проверяет 20 конкурентных одинаковых платежей, success/failover/timeout,
+сохранение outbox при остановке worker, параллельных worker и повторные callback.
+Контрольный конечный баланс — **88 токенов**, без двойных списаний и возвратов.
+## Известные ограничения
 
-### Известные ограничения
-
-- `GET /users/{id}/balance` читает баланс и проводки в одной
-  `REPEATABLE READ` транзакции, чтобы исключить смешанные снимки.
-- Фейковый провайдер использует in-memory список задач и
-  FastAPI BackgroundTasks. После аварийного рестарта провайдера
-  невыполненный callback может пропасть; watchdog завершит попытку.
-- Тест перезапуска worker подтверждает восстановление **ожидающего**
-  события outbox, а не все возможные моменты падения при внешнем HTTP.
-- Журнал тестов и E2E прогонов не является гарантией отсутствия всех
-  редких гонок при реальной эксплуатации.
-
-
-### Дополнительные проверки схемы
-
-После запуска `docker compose up --build -d` можно проверить отсутствие
-расхождений ORM и миграций:
-
-```powershell
-docker compose exec api alembic check
-```
-
-Существующие базы данных обновляются обычным `alembic upgrade head`.
-Не редактируйте уже применённую начальную миграцию.
+- Фейковые провайдеры хранят заявки в памяти процесса; при перезапуске
+  callback может потеряться, после чего watchdog переведёт задачу по таймауту.
+- Внешний HTTP использует семантику **at-least-once**: после сетевой
+  неопределённости возможен повторный POST. Идемпотентность фейковых
+  провайдеров действует только в пределах жизни их процесса.
+- E2E проверяет восстановление ожидающего outbox-события при перезапуске
+  worker, но не все возможные точки падения во время HTTP.
+- Тесты подтверждают проверенные сценарии и инварианты, а не абсолютное
+  отсутствие редких конкурентных ошибок.
