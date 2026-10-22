@@ -12,13 +12,33 @@ import subprocess
 import time
 import uuid
 from collections.abc import Awaitable, Callable
+from typing import TypedDict
 
 import httpx
+from pydantic import TypeAdapter
 
 API = "http://127.0.0.1:18000"
 ALPHA = "http://127.0.0.1:18101"
 BETA = "http://127.0.0.1:18102"
 COMPOSE = ["docker", "compose", "-p", "integer-e2e", "-f", "compose.e2e.yaml"]
+
+
+class E2EAttempt(TypedDict):
+    id: str
+    provider: str
+
+
+class E2ETask(TypedDict):
+    status: str
+    attempts: list[E2EAttempt]
+
+
+class E2EBalance(TypedDict):
+    balance: int
+
+
+TASK_ADAPTER = TypeAdapter(E2ETask)
+BALANCE_ADAPTER = TypeAdapter(E2EBalance)
 
 
 def docker(*args: str) -> None:
@@ -59,16 +79,16 @@ async def configure(client: httpx.AsyncClient, provider: str, mode: str) -> None
     assert response.status_code == 200, response.text
 
 
-async def balance(client: httpx.AsyncClient, user: str) -> dict[str, object]:
+async def balance(client: httpx.AsyncClient, user: str) -> E2EBalance:
     r = await client.get(f"{API}/users/{user}/balance")
     r.raise_for_status()
-    return r.json()
+    return BALANCE_ADAPTER.validate_python(r.json())
 
 
-async def task(client: httpx.AsyncClient, task_id: str) -> dict[str, object]:
+async def task(client: httpx.AsyncClient, task_id: str) -> E2ETask:
     r = await client.get(f"{API}/tasks/{task_id}")
     r.raise_for_status()
-    return r.json()
+    return TASK_ADAPTER.validate_python(r.json())
 
 
 async def main() -> None:

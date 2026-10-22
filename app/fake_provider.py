@@ -23,9 +23,19 @@ PROVIDER_NAME = os.getenv("PROVIDER_NAME", "alpha")
 CALLBACK_BASE = os.getenv("PROVIDER_CALLBACK_BASE", "http://api:8000")
 CONTROL_ENABLED = os.getenv("FAKE_PROVIDER_TEST_CONTROL", "0") == "1"
 VALID_MODES = {
-    "success", "technical", "moderation", "payload", "duplicate",
-    "no_webhook", "late_success", "http_500", "http_503",
-    "http_400", "http_403", "timeout", "random",
+    "success",
+    "technical",
+    "moderation",
+    "payload",
+    "duplicate",
+    "no_webhook",
+    "late_success",
+    "http_500",
+    "http_503",
+    "http_400",
+    "http_403",
+    "timeout",
+    "random",
 }
 
 app = FastAPI(title=f"Fake provider {PROVIDER_NAME}")
@@ -124,9 +134,7 @@ async def create_task(
         raise HTTPException(status_code=400, detail="Unsupported model or reference count")
 
     key = str(request.attempt_id)
-    fingerprint = hashlib.sha256(
-        request.model_dump_json().encode("utf-8")
-    ).hexdigest()
+    fingerprint = hashlib.sha256(request.model_dump_json().encode("utf-8")).hexdigest()
     async with jobs_lock:
         existing = jobs.get(key)
         if existing is not None:
