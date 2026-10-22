@@ -17,8 +17,8 @@ from sqlalchemy import select
 from app.config import settings
 from app.db import engine, session_factory
 from app.main import app
-from app.models import GenerationTask, LedgerEntry, LedgerKind, OutboxEvent, TaskStatus
-from app.worker import process_one
+from app.models import GenerationTask, LedgerEntry, LedgerKind, TaskStatus
+from app.worker import dispatch_attempt
 from test_generation import fund
 
 pytestmark = pytest.mark.skipif(
@@ -52,7 +52,7 @@ async def generate(client: AsyncClient, user_id: str, model: str = "image-fast")
     return str(created.json()["task_id"])
 
 
-async def dispatch_and_capture() -> dict[str, str]:
+async def dispatch_and_capture(attempt_id: str) -> dict[str, str]:
     captured: dict[str, str] = {}
 
     def provider(request: httpx.Request) -> httpx.Response:
@@ -61,7 +61,7 @@ async def dispatch_and_capture() -> dict[str, str]:
         return httpx.Response(202, json={"external_id": data["attempt_id"]})
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(provider)) as client:
-        assert await process_one(client) is True
+        await dispatch_attempt(uuid.UUID(attempt_id), client)
     return captured
 
 
@@ -71,7 +71,8 @@ async def test_provider_success_and_duplicate_callback() -> None:
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         await fund(client, user_id, 20)
         task_id = await generate(client, user_id)
-        data = await dispatch_and_capture()
+        first_state = (await client.get(f"/tasks/{task_id}")).json()
+        data = await dispatch_and_capture(first_state["current_leg"]["id"])
         assert data["task_id"] == task_id
         event = {
             "task_id": task_id,
@@ -102,7 +103,8 @@ async def test_technical_error_advances_to_beta_and_late_alpha_ignored() -> None
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         await fund(client, user_id, 50)
         task_id = await generate(client, user_id)
-        first = await dispatch_and_capture()
+        first_state = (await client.get(f"/tasks/{task_id}")).json()
+        first = await dispatch_and_capture(first_state["current_leg"]["id"])
         fail = {
             "task_id": task_id,
             "attempt_id": first["attempt_id"],
@@ -114,7 +116,8 @@ async def test_technical_error_advances_to_beta_and_late_alpha_ignored() -> None
         response = await client.post("/webhooks/providers/alpha", content=raw, headers=headers)
         assert response.status_code == 200
         assert response.json()["outcome"] == "advanced"
-        second = await dispatch_and_capture()
+        second_state = (await client.get(f"/tasks/{task_id}")).json()
+        second = await dispatch_and_capture(second_state["current_leg"]["id"])
         assert second["attempt_id"] != first["attempt_id"]
         done = {
             "task_id": task_id,
@@ -180,12 +183,6 @@ async def test_parallel_final_failures_refund_exactly_once() -> None:
                 )
             )
         ).all()
-        pending = (
-            await session.scalars(
-                select(OutboxEvent).where(OutboxEvent.done_at.is_(None))
-            )
-        ).all()
     assert task is not None
     assert task.status == TaskStatus.failed
     assert len(refunds) == 1
-    assert len(pending) == 0
