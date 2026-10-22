@@ -1,6 +1,6 @@
 # Integer generation service
 
-**Status: stage 2.5 — frozen initial migration, shared token ledger, isolated PostgreSQL tests. Generation and provider orchestration are not yet implemented. Not ready for submission.**
+**Status: stage 3 — generation admission, debit, and transactional outbox implemented; provider dispatch and completion remain unimplemented. Not ready for submission.**
 
 ## Quick start
 
@@ -70,8 +70,8 @@ The Docker integration tests cover 20 simultaneous identical payments, 12 differ
 ## Development stages
 
 1. Scaffold/schema (**done**).
-2. Signed payment webhook and concurrency-safe ledger (**8 tests passed locally on PostgreSQL**).\n2.5. Frozen migration, shared ledger and isolated DB tests (**implemented; pending local verification**).
-3. Generation API and transactional debit.
+2. Signed payment webhook and concurrency-safe ledger (**done**).\n2.5. Frozen migration, shared ledger and isolated DB tests (**done; 10 integration tests passed**).
+3. Generation API and transactional debit (**implemented; awaiting integration verification**).
 4. Provider routing and callbacks.
 5. Watchdog, timeout recovery, and once-only refunds.
 6. Comprehensive multi-worker race/crash tests.
@@ -82,3 +82,13 @@ Provider result ingestion, timeout recovery and refunds are not implemented yet.
 ### Stage 2.5 verification
 
 Run `docker compose run --build --rm tests` to recreate the test database, run migrations from zero and execute integration tests. Validate with Ruff and Pyright before treating this stage as finished. The read endpoint currently performs separate balance/ledger queries; consistent read snapshots and true process-kill tests remain future hardening items.
+
+## Generation admission (stage 3)
+
+`POST /generate` accepts `{"user_id":"<UUID>","model_slug":"image-fast","prompt":"a cat","ref_images":[]}` and returns HTTP 202 with task ID, initial status, selected provider, price and resulting balance. `GET /tasks/{task_id}` returns status, current leg and ordered attempt history.
+
+The service first validates the model and finds the first eligible provider leg in priority order; no matching leg returns 400 without debiting. It then locks the user's row, counts active (pending/processing) tasks and enforces a maximum of three (429), then debits the model price (402 when insufficient funds). In **one PostgreSQL transaction** it commits the debit journal entry, generation task, first provider attempt and outbox dispatch event. Nothing is sent over the network while holding the transaction. Concurrent submissions for one user serialize on that user's row lock. A missing user is treated as insufficient funds (402), since no registration endpoint is in scope.
+
+**Important:** the worker, provider HTTP requests, provider webhooks, timeout watchdog and refunds remain to be implemented. An accepted generation remains pending until that functionality is added. The outbox event is durable but not yet consumed. `POST /generate` has no client-provided idempotency key in the assignment; retries intentionally create new tasks and spend again if otherwise eligible.
+
+New PostgreSQL tests validate initial task/attempt/outbox creation, eligible leg selection and rejection, 10 simultaneous submissions respecting the active-task limit, five concurrent submissions with funds for just one, and no debit on rejected generation.
