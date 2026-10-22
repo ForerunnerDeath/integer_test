@@ -1,6 +1,6 @@
 # Integer generation service
 
-**Status: stage 5 — provider watchdog, late-webhook protection and fenced outbox leases added. Awaiting PostgreSQL integration verification; not ready for submission.**
+**Status: stage 6 — a separate four-worker E2E Compose stack and live-network test harness have been added. The 21 DB integration tests passed locally before these changes. E2E remains unverified; not ready for submission.**
 
 ## Quick start
 
@@ -18,7 +18,7 @@ Without that flag, host-side `pytest` skips DB-dependent integration tests; pure
 - Health: http://localhost:8000/health
 - PostgreSQL from host: `localhost:55432` (user/password/database: `integer`)
 - Four API worker processes are configured via Uvicorn.
-- The separate background worker and Alpha/Beta services are still stage-1 scaffolds.
+- The background worker, provider HTTP endpoints and signed callbacks are implemented.
 
 ## Payment webhook — implemented
 
@@ -74,7 +74,7 @@ The Docker integration tests cover 20 simultaneous identical payments, 12 differ
 3. Generation API and transactional debit (**implemented; awaiting integration verification**).
 4. Provider routing and callbacks (**implemented; local verification required**).
 5. Watchdog, timeout recovery, and once-only refunds (**implemented; awaiting verification**).
-6. Comprehensive multi-worker race/crash tests.
+6. Comprehensive multi-worker race/crash tests (**live-network harness added; requires Docker validation and process-crash hardening**).
 7. Code review and documentation.
 
 Provider result ingestion, timeout recovery and refunds are not implemented yet. Their guarantees will be documented after implementation.
@@ -118,3 +118,25 @@ The worker now scans for expired attempts periodically (`WATCHDOG_INTERVAL_SECON
 The simulator's `late_success` and `no_webhook` modes support manual end-to-end testing. Stage-five tests cover first-leg timeout → second-leg success, concurrent watchdog scans exhausting both legs → exactly one refund, ignoring a late completed callback after refund, and rejection of a stale outbox acknowledgement.
 
 **Limitations:** provider submission is at-least-once on ambiguous transport failure. The fake provider is not durable across a process restart; its stable external ID is necessary but does not by itself make simulated submission fully idempotent. Four independent Uvicorn-worker networking and actual process-kill/restart tests remain stage six.
+
+
+## Stage 6: isolated live-network E2E
+
+Run this from the project root on Windows, with Docker Desktop running and Python HTTPX installed:
+
+```powershell
+git pull origin feat/generation-service
+docker compose -f compose.e2e.yaml -p integer-e2e up --build -d
+.\.venv\Scripts\python.exe tests/e2e_live.py
+docker compose -f compose.e2e.yaml -p integer-e2e down
+```
+
+The separate Compose file **does not use the development database**: it creates its own project, ephemeral `integer_e2e` PostgreSQL, API listening on `127.0.0.1:18000`, and fake providers on `127.0.0.1:18101` and `127.0.0.1:18102`. The test controls are enabled **only** in this E2E environment; the ordinary app does not expose them. The E2E database is discarded when the container stops; never run this suite against data you need to keep.
+
+The E2E driver sends **20 concurrent payment webhooks through the real HTTP server**, verifies one credit, checks a normal Alpha completion and technical Alpha → Beta failover, then triggers no-callback timeout with automatic refund. It stops the worker, creates a task while the worker is offline, starts it again and checks that the queued event is processed. Finally, it scales to two worker containers, sends three simultaneous generation requests with concurrent duplicate callbacks, and verifies the resulting balance.
+
+The API container starts Uvicorn with **four processes**; the E2E checks traverse the real published endpoint. This tests the multi-process service but does not establish that every request hit a distinct API process; explicit process-kill and crash-recovery exercises remain to be performed. The E2E script currently requires a fresh E2E database and is not designed for rerunning in parallel.
+
+Provider simulator settings: `FAKE_PROVIDER_FAILURE_RATE` and `FAKE_PROVIDER_FAILURE_TYPE` enable randomized failure with `FAKE_PROVIDER_MODE=random`; `FAKE_PROVIDER_MODE` also supports fixed outcomes such as `technical`, `payload`, `moderation`, `no_webhook`, `late_success`, `duplicate`, and synchronous HTTP failures. The fake providers keep accepted job IDs in memory so repeated submissions to the same running simulator do not start a second callback. Provider-process restarts still lose this state, which is a known limit of the simulator rather than a proven exactly-once remote execution guarantee.
+
+**E2E status:** source has been committed, but these tests have not yet been executed on Docker. Collect stdout and `docker compose -f compose.e2e.yaml -p integer-e2e logs --tail=100` for any failures. Continue to run `ruff check .`, `ruff format --check .` and `pyright` before delivery.
