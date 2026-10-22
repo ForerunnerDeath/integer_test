@@ -9,11 +9,11 @@ import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import func, select
+from test_payments import payment, signed_body
 
 from app.db import engine, session_factory
 from app.main import app
 from app.models import GenerationTask, LedgerEntry, OutboxEvent, ProviderAttempt, User
-from test_payments import payment, signed_body
 
 pytestmark = pytest.mark.skipif(
     os.getenv("RUN_DB_TESTS") != "1",
@@ -43,8 +43,10 @@ async def test_generation_debits_and_creates_outbox_atomically() -> None:
         created = await client.post(
             "/generate",
             json={
-                "user_id": user_id, "model_slug": "image-fast",
-                "prompt": "cat on the moon", "ref_images": [],
+                "user_id": user_id,
+                "model_slug": "image-fast",
+                "prompt": "cat on the moon",
+                "ref_images": [],
             },
         )
         assert created.status_code == 202, created.text
@@ -62,6 +64,7 @@ async def test_generation_debits_and_creates_outbox_atomically() -> None:
     async with session_factory() as session:
         task_id = uuid.UUID(data["task_id"])
         task_row = await session.get(GenerationTask, task_id)
+        assert task_row is not None
         events = (
             await session.scalars(
                 select(OutboxEvent).where(
@@ -70,11 +73,8 @@ async def test_generation_debits_and_creates_outbox_atomically() -> None:
             )
         ).all()
         attempts = (
-            await session.scalars(
-                select(ProviderAttempt).where(ProviderAttempt.task_id == task_id)
-            )
+            await session.scalars(select(ProviderAttempt).where(ProviderAttempt.task_id == task_id))
         ).all()
-    assert task_row is not None
     assert len(events) == 1
     assert events[0].payload["task_id"] == str(task_id)
     assert len(attempts) == 1
@@ -88,21 +88,26 @@ async def test_routing_limits_and_validation_before_debit() -> None:
         beta = await client.post(
             "/generate",
             json={
-                "user_id": user_id, "model_slug": "image-fast",
-                "prompt": "sea", "ref_images": ["a", "b", "c", "d", "e"],
+                "user_id": user_id,
+                "model_slug": "image-fast",
+                "prompt": "sea",
+                "ref_images": ["a", "b", "c", "d", "e"],
             },
         )
         impossible = await client.post(
             "/generate",
             json={
-                "user_id": user_id, "model_slug": "video-long",
-                "prompt": "sea", "ref_images": ["a", "b", "c"],
+                "user_id": user_id,
+                "model_slug": "video-long",
+                "prompt": "sea",
+                "ref_images": ["a", "b", "c"],
             },
         )
         unknown = await client.post(
             "/generate",
             json={
-                "user_id": user_id, "model_slug": "missing",
+                "user_id": user_id,
+                "model_slug": "missing",
                 "prompt": "sea",
             },
         )
@@ -135,9 +140,9 @@ async def test_concurrent_admissions_never_exceed_three_tasks() -> None:
 
     async with session_factory() as session:
         count = await session.scalar(
-            select(func.count()).select_from(GenerationTask).where(
-                GenerationTask.user_id == uuid.UUID(user_id)
-            )
+            select(func.count())
+            .select_from(GenerationTask)
+            .where(GenerationTask.user_id == uuid.UUID(user_id))
         )
     assert count == 3
 
@@ -183,9 +188,9 @@ async def test_failed_generation_leaves_balance_and_ledger_untouched() -> None:
             )
         )
         active = await session.scalar(
-            select(func.count()).select_from(GenerationTask).where(
-                GenerationTask.user_id == uuid.UUID(user_id)
-            )
+            select(func.count())
+            .select_from(GenerationTask)
+            .where(GenerationTask.user_id == uuid.UUID(user_id))
         )
     assert db_user is not None
     assert db_user.balance == total == 5

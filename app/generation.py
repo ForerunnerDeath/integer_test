@@ -82,9 +82,7 @@ async def generate(request: GenerateRequest) -> GenerateResponse:
 
     async with session_factory() as session:
         async with session.begin():
-            model = await session.scalar(
-                select(Model).where(Model.slug == request.model_slug)
-            )
+            model = await session.scalar(select(Model).where(Model.slug == request.model_slug))
             if model is None:
                 raise HTTPException(status_code=400, detail="Unknown model")
 
@@ -160,7 +158,7 @@ async def generate(request: GenerateRequest) -> GenerateResponse:
             event = OutboxEvent(
                 event_key=f"dispatch:{attempt_id}",
                 topic="dispatch_attempt",
-                payload={"task_id":str(task_id), "attempt_id":str(attempt_id)},
+                payload={"task_id": str(task_id), "attempt_id": str(attempt_id)},
             )
             session.add_all((task, attempt, event))
 
