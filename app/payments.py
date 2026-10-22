@@ -6,12 +6,12 @@ from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field, ValidationError
-from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.config import settings
 from app.db import session_factory
-from app.models import LedgerEntry, LedgerKind, Payment, User
+from app.ledger import BalanceOverflow, locked_user, record_movement
+from app.models import LedgerKind, Payment, User
 from app.security import verify_webhook_signature
 
 router = APIRouter(tags=["payments"])
@@ -53,11 +53,7 @@ async def credit_payment(event: PaymentWebhook) -> PaymentOutcome:
 
             # Serialize *all* movements of the same user's balance before
             # changing the cached balance and appending its ledger entry.
-            user = await session.scalar(
-                select(User).where(User.id == event.user_id).with_for_update()
-            )
-            if user is None:
-                raise RuntimeError("User insert did not create or find a user")
+            user = await locked_user(session, event.user_id)
 
             # The unique payment ID is the idempotency guard, even when
             # callbacks race from different API worker processes.
@@ -83,16 +79,15 @@ async def credit_payment(event: PaymentWebhook) -> PaymentOutcome:
                     )
                 return "duplicate"
 
-            user.balance += event.tokens
-            session.add(
-                LedgerEntry(
-                    user_id=user.id,
+            try:
+                await record_movement(
+                    session, user,
                     operation_key=operation_key,
                     kind=LedgerKind.credit,
-                    delta=event.tokens,
-                    balance_after=user.balance,
+                    amount=event.tokens,
                 )
-            )
+            except BalanceOverflow as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     return "credited"
 
