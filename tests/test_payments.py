@@ -149,3 +149,52 @@ async def test_pending_then_completed_credits_once() -> None:
     assert completed.json()["status"] == "credited"
     assert repeated.json()["status"] == "duplicate"
     assert balance.json()["balance"] == 11
+
+
+@pytest.mark.asyncio
+async def test_credit_preserves_balance_equals_full_ledger_sum() -> None:
+    """Journal arithmetic remains valid even after multiple unrelated payments."""
+    from sqlalchemy import func, select
+
+    from app.db import session_factory
+    from app.models import LedgerEntry, User
+
+    user_id = str(uuid.uuid4())
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        for amount in (3, 12, 7):
+            body, headers = signed_body(payment(user_id, tokens=amount))
+            response = await client.post("/webhooks/payments", content=body, headers=headers)
+            assert response.status_code == 200
+
+    async with session_factory() as session:
+        user = await session.get(User, uuid.UUID(user_id))
+        total = await session.scalar(
+            select(func.coalesce(func.sum(LedgerEntry.delta), 0)).where(
+                LedgerEntry.user_id == uuid.UUID(user_id)
+            )
+        )
+    assert user is not None
+    assert user.balance == total == 22
+
+
+@pytest.mark.asyncio
+async def test_balance_overflow_rolls_back_payment_and_journal() -> None:
+    """A BIGINT overflow must not leave a successful payment record behind."""
+    from app.db import session_factory
+    from app.models import Payment
+
+    user_id = str(uuid.uuid4())
+    p1 = payment(user_id, tokens=2**63 - 2)
+    p2 = payment(user_id, tokens=3)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        body, headers = signed_body(p1)
+        first = await client.post("/webhooks/payments", content=body, headers=headers)
+        body, headers = signed_body(p2)
+        overflow = await client.post("/webhooks/payments", content=body, headers=headers)
+        result = await client.get(f"/users/{user_id}/balance")
+    assert first.status_code == 200
+    assert overflow.status_code == 409
+    assert result.json()["balance"] == 2**63 - 2
+    assert len(result.json()["operations"]) == 1
+    async with session_factory() as session:
+        assert await session.get(Payment, p2["payment_id"]) is None
