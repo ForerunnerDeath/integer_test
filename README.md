@@ -1,142 +1,161 @@
-# Integer generation service
+# Integer — Generation Service
 
-**Status: stage 6 — a separate four-worker E2E Compose stack and live-network test harness have been added. The 21 DB integration tests passed locally before these changes. E2E remains unverified; not ready for submission.**
+Асинхронный сервис генерации на Python 3.12, FastAPI, PostgreSQL и SQLAlchemy.
+Поддерживает четыре Uvicorn API-процесса, двух фейковых провайдеров (Alpha/Beta),
+платёжные вебхуки, дебет/возврат токенов, журнал операций, failover и watchdog.
 
-## Quick start
+## Запуск
 
-```bash
-cp .env.example .env
+```powershell
+Copy-Item .env.example .env
 docker compose up --build -d
-docker compose run --build --rm tests
 ```
 
-In PowerShell use `Copy-Item .env.example .env` instead of `cp`.
-The Docker test service runs integration tests against an **isolated ephemeral PostgreSQL container** (`test-db`), not the development database, and sets `RUN_DB_TESTS=1`. The `test-migrate` service applies the complete migration chain to this fresh database. The test database is discarded when the test container is removed; it is not persistent.
-Without that flag, host-side `pytest` skips DB-dependent integration tests; pure API and signature tests still run.
+Документация API: http://localhost:8000/docs
+Проверка состояния: http://localhost:8000/health
 
-- API: http://localhost:8000/docs
-- Health: http://localhost:8000/health
-- PostgreSQL from host: `localhost:55432` (user/password/database: `integer`)
-- Four API worker processes are configured via Uvicorn.
-- The background worker, provider HTTP endpoints and signed callbacks are implemented.
+Пользователь создаётся первым успешным платежным вебхуком: отдельного
+endpoint регистрации по заданию нет. Для запросов к вебхукам требуется
+`X-Signature`: hex HMAC-SHA256 **оригинальных байтов JSON** с общим секретом.
+Значения секретов для локальной разработки приведены в `.env.example`.
 
-## Payment webhook — implemented
+### API
 
-`POST /webhooks/payments` accepts a JSON body of the form:
+| Метод | Путь | Назначение |
+| --- | --- | --- |
+| POST | `/webhooks/payments` | Подписанная оплата: `payment_id, user_id, tokens, status` |
+| POST | `/generate` | `user_id, model_slug, prompt, ref_images`; возвращает 202 и `task_id` |
+| POST | `/webhooks/providers/{name}` | Подписанный результат Alpha/Beta |
+| GET | `/tasks/{task_id}` | Текущий статус, провайдер и история попыток |
+| GET | `/users/{user_id}/balance` | Баланс и 20 последних проводок |
+| GET | `/health` | Healthcheck |
 
-```json
-{"payment_id": "external-123", "user_id": "11111111-1111-1111-1111-111111111111", "tokens": 25, "status": "completed"}
-```
+Неизвестная модель или отсутствие подходящих ног: HTTP 400 до списания.
+Недостаточно токенов: 402. Уже три активные генерации: 429.
+Некорректная подпись вебхука: 401.
 
-`X-Signature` must be a **hex-encoded HMAC-SHA256 of the exact raw request body**, using `PAYMENT_WEBHOOK_SECRET` (the development default is in `.env.example`). Never sign a re-serialized JSON object instead of its original bytes.
+### Каталог и маршрутизация
 
-Accepted successful statuses: `completed`, `paid`, `success`, `succeeded` (case-insensitive). Other statuses return `{"status":"ignored"}` without recording a payment, so e.g. a `pending` event can later become `completed`. This is an explicit convention because the assignment did not define the payment status vocabulary.
+| Модель | Цена | Ноги по приоритету |
+| --- | ---: | --- |
+| `image-fast` | 2 | alpha (до 4 референсов) → beta (до 10) |
+| `video-long` | 25 | beta (до 2) → alpha (до 1, `skip_on_moderation`) |
 
-Successful callbacks respond `{"status":"credited"}`; exact replays respond `{"status":"duplicate"}`. Reusing a payment ID with a different user or token amount returns HTTP 409. Missing/bad signatures return 401; malformed payloads return 422.
+Нога подходит, если `len(ref_images) <= max_ref_images`. Ошибка `technical`,
+HTTP 5xx или сетевой таймаут переключает на следующую совместимую ногу.
+После `moderation` пропускаются последующие ноги с
+`skip_on_moderation=True`. Ошибка `payload` завершает задачу немедленно.
+Если ног больше нет, задача переходит в `failed` с возвратом средств.
 
-For this exercise the first successful payment **creates the user** if missing, since registration is out of scope. `GET /users/{uuid}/balance` returns the balance and 20 most recent journal operations; an unknown user returns 404.
+### Гарантии токенов и однократной обработки
 
-### Why one credit happens even with 20 identical concurrent callbacks
+**Платёж.** Одна транзакция PostgreSQL создаёт пользователя (если нужно),
+блокирует его строку `SELECT FOR UPDATE`, вставляет платёж с уникальным
+`payment_id`, а для победившей вставки увеличивает баланс и записывает
+`ledger_entries`. Повторный платёж с теми же реквизитами не начисляется снова.
+Повторное использование ID с другой суммой или пользователем даёт 409.
+Нефинальные статусы платежа игнорируются до получения успешного статуса.
 
-The API verifies the signature before interpreting the message. A single PostgreSQL transaction:
+**Генерация.** Проверка лимита активных задач, списание, создание задачи,
+первой попытки и события `outbox_events` выполняются внутри одной транзакции
+после блокировки пользователя. Конкурентные запросы к одному пользователю
+не могут обойти лимит задач или дважды потратить одни и те же токены.
 
-1. Inserts the user if missing (`ON CONFLICT DO NOTHING`).
-2. Locks their row with `SELECT FOR UPDATE`, serializing competing changes of this user's balance.
-3. Inserts the external payment with unique `payment_id` (`ON CONFLICT DO NOTHING RETURNING`).
-4. **Only for the winner:** increases the user's cached balance and inserts one ledger entry with a deterministic unique operation key.
+**Failover и возврат.** Обработчик результата блокирует строки в порядке
+«пользователь → задача → попытка», проверяет идентификатор текущей попытки
+и её состояние. В случае исчерпания ног финальный статус `failed`,
+возврат денег и проводка с уникальным ключом `refund:{task_id}`
+фиксируются одной транзакцией. Дубликаты и проигравшие гонку вебхуки
+игнорируются; сумма баланса равна сумме всех проводок пользователя.
 
-The shared `app/ledger.py` module enforces signed movement direction, non-negative balance, and PostgreSQL BIGINT bounds. Debit/refund flows must call this service inside their own transaction with a locked user. The payment, balance and ledger commit or roll back **together**. If a process crashes before commit, PostgreSQL rolls back all changes; a retry may complete. If it crashes after commit but before replying, a retry sees the existing payment and does not credit again. Different simultaneous payments for the same user are serialized, so none can overwrite another's balance. The full set of future balance debit/refund flows must use the same locking convention.
+**Падение процесса во время вебхука.** Если процесс падает до commit, PostgreSQL
+откатывает и статус, и изменение баланса, и проводку. Если падение происходит
+после commit, повторный вебхук видит уже завершённую попытку/платёж и
+не выполняет повторное начисление или возврат.
 
-## Migrations and seed data
+**Поздний completed.** Если watchdog уже перевёл попытку на следующую ногу
+или завершил задачу с возвратом, опоздавший результат игнорируется.
+Если успешный вебхук получает блокировку и фиксирует результат первым,
+watchdog не отменяет успех задним числом. Одновременно получить
+`completed` и возврат невозможно при корректной обработке через PostgreSQL.
 
-`docker compose run --rm migrate alembic upgrade head` applies the initial migration, including:
-- `image-fast`, price 2, alpha(max 4) → beta(max 10).
-- `video-long`, price 25, beta(max 2) → alpha(max 1, skip_on_moderation).
+**Outbox.** Диспетчер использует `FOR UPDATE SKIP LOCKED`, аренду
+(`claimed_until`), время повторной попытки и проверку владения lease
+при подтверждении. Внешняя отправка происходит *после* коммита
+финансовой транзакции. Повторная отправка может произойти при сетевой
+неопределённости или падении worker; идентификатор попытки постоянный.
+Фейковые провайдеры обеспечивают идемпотентность повторного `POST /tasks`
+в пределах жизни процесса, но их память не сохраняется после рестарта.
+Строгое «ровно один раз» для удалённого выполнения через HTTP не заявляется.
 
-For a new schema change, create `alembic revision -m "reason"`, implement explicit `upgrade()` and `downgrade()` operations, and run `alembic upgrade head`. The first migration uses explicit Alembic operations so later ORM edits cannot change historical migrations. It preserves the initial schema and revision ID; databases already migrated at that revision need no schema changes. Subsequent schema changes must be new revisions; never edit historical migrations after the assignment is deployed.
+**Watchdog.** Попытки `sending`/`waiting` с истёкшим `deadline_at`
+обрабатываются теми же транзакционными переходами, что и ошибки вебхука.
+`PROVIDER_TIMEOUT` по умолчанию 60 секунд;
+`WATCHDOG_INTERVAL_SECONDS` — 2 секунды.
+Повторная доставка outbox не продлевает уже установленный deadline.
 
-## Tests and developer checks
+### Фейковые провайдеры
+
+POST `/tasks` отвечает 202 с `external_id` и позднее отправляет
+подписанный `completed`/ `failed`.
+Поддерживаются настройки окружения `FAKE_PROVIDER_MODE`,
+`FAKE_PROVIDER_DELAY`, `FAKE_PROVIDER_FAILURE_RATE`,
+`FAKE_PROVIDER_FAILURE_TYPE`.
+Режимы: `success`, `technical`, `moderation`, `payload`,
+`duplicate`, `no_webhook`, `late_success`, `http_500`, `http_503`,
+`http_400`, `http_403`, `timeout`, `random`.
+Стандартная задержка фейкового провайдера — 2 секунды.
+`/_test/config` и `/_test/jobs/{attempt_id}` разрешены только при
+`FAKE_PROVIDER_TEST_CONTROL=1` в отдельном E2E-контуре.
+
+### Миграции
+
+Применение: `docker compose run --rm migrate alembic upgrade head`
+(при обычном `docker compose up` сервис `migrate` выполняет этот шаг).
+Текущая миграция `migrations/versions/0001_initial.py` фиксирует DDL и
+стартовые модели. Для нового изменения выполните
+`alembic revision -m "description"`, добавьте явные операции
+`upgrade()`/`downgrade()`, затем `alembic upgrade head`.
+Не редактируйте старую миграцию после развёртывания на реальной базе.
+
+### Интеграционные тесты (PostgreSQL)
 
 ```powershell
 docker compose run --build --rm tests
 .\.venv\Scripts\python.exe -m ruff check .
 .\.venv\Scripts\python.exe -m ruff format --check .
 .\.venv\Scripts\python.exe -m pyright
-.\.venv\Scripts\python.exe -m pytest -q
 ```
 
-The Docker integration tests cover 20 simultaneous identical payments, 12 different simultaneous payments to one user, duplicate-ID conflicts, invalid signatures, and `pending → completed` status transitions. The 10 simultaneous provider failure/refund test belongs to stage 5.
+Тестовая БД `test-db` отделена от БД разработки.
+Проверяются конкурентные платежи и генерации, двойные callback,
+fallback, возврат единожды, поздний `completed`, таймауты watchdog,
+потерянный lease, синхронные сбои провайдеров, moderation/payload.
 
-## Development stages
-
-1. Scaffold/schema (**done**).
-2. Signed payment webhook and concurrency-safe ledger (**done**).\n2.5. Frozen migration, shared ledger and isolated DB tests (**done; 10 integration tests passed**).
-3. Generation API and transactional debit (**implemented; awaiting integration verification**).
-4. Provider routing and callbacks (**implemented; local verification required**).
-5. Watchdog, timeout recovery, and once-only refunds (**implemented; awaiting verification**).
-6. Comprehensive multi-worker race/crash tests (**live-network harness added; requires Docker validation and process-crash hardening**).
-7. Code review and documentation.
-
-Provider result ingestion, timeout recovery and refunds are not implemented yet. Their guarantees will be documented after implementation.
-
-### Stage 2.5 verification
-
-Run `docker compose run --build --rm tests` to recreate the test database, run migrations from zero and execute integration tests. Validate with Ruff and Pyright before treating this stage as finished. The read endpoint currently performs separate balance/ledger queries; consistent read snapshots and true process-kill tests remain future hardening items.
-
-## Generation admission (stage 3)
-
-`POST /generate` accepts `{"user_id":"<UUID>","model_slug":"image-fast","prompt":"a cat","ref_images":[]}` and returns HTTP 202 with task ID, initial status, selected provider, price and resulting balance. `GET /tasks/{task_id}` returns status, current leg and ordered attempt history.
-
-The service first validates the model and finds the first eligible provider leg in priority order; no matching leg returns 400 without debiting. It then locks the user's row, counts active (pending/processing) tasks and enforces a maximum of three (429), then debits the model price (402 when insufficient funds). In **one PostgreSQL transaction** it commits the debit journal entry, generation task, first provider attempt and outbox dispatch event. Nothing is sent over the network while holding the transaction. Concurrent submissions for one user serialize on that user's row lock. A missing user is treated as insufficient funds (402), since no registration endpoint is in scope.
-
-**Important:** the outbox worker, fake provider HTTP requests, provider webhooks and terminal refunds are now implemented. The watchdog, stuck-event recovery policies and crash/retry verification are not yet complete. `POST /generate` has no client-provided idempotency key in the assignment; retries intentionally create new tasks and spend again if otherwise eligible.
-
-New PostgreSQL tests validate initial task/attempt/outbox creation, eligible leg selection and rejection, 10 simultaneous submissions respecting the active-task limit, five concurrent submissions with funds for just one, and no debit on rejected generation.
-
-
-## Provider lifecycle (stage 4; pending local integration verification)
-
-The worker claims ready outbox events with PostgreSQL `FOR UPDATE SKIP LOCKED` and a lease, then submits `POST /tasks` to Alpha or Beta. A stable attempt UUID is sent as the provider's external task ID; the simulator treats this identifier as its idempotency key. The worker **does not hold task-row locks while making HTTP requests**.
-
-Fake provider services read these optional environment variables (configure under each provider's Compose `environment`): `FAKE_PROVIDER_MODE` (`success`, `technical`, `moderation`, `payload`, `duplicate`, `no_webhook`, `late_success`, `http_500`, `http_503`, `http_400`, `http_403`, or `timeout`) and `FAKE_PROVIDER_DELAY` (default two seconds). They accept `POST /tasks`, return HTTP 202 with the stable `external_id`, and send a signed callback to `/webhooks/providers/{name}`.
-
-Provider callbacks sign the **unmodified JSON bytes** with `PROVIDER_WEBHOOK_SECRET` and supply a hex HMAC in `X-Signature`. Completed callbacks persist their result URL. Technical failures advance to the next suitable leg; moderation failures skip legs marked `skip_on_moderation`; payload errors terminate immediately. Once all available legs fail, the task transitions to failed and the shared ledger refunds its price within the same transaction. Duplicate, superseded and late callbacks cannot change a terminal task or grant a second refund. The provider simulator and integration tests use this agreed callback schema; it is not a public external API standard.
-
-The new integration tests cover successful delivery with simultaneous duplicate callbacks, technical failover to the next provider with ignored late results, and ten simultaneous final-failure callbacks resulting in exactly one refund. **These new tests and the linters still need to run in the user's Docker/local environment.**
-
-Caveats: the worker uses a leased outbox event, but dispatch-after-crash may be attempted again, requiring provider-side idempotency. The fake provider uses FastAPI BackgroundTasks, not durable job storage, and its scheduled callback can disappear on a provider process restart. The watchdog now expires attempts that have passed their stored deadline, tries the next eligible leg, or marks the task failed with an exactly-once ledger refund. Outbox acknowledgements are fenced by the claimed lease deadline; a stale worker cannot complete a lease claimed by another worker. Full process-crash and four-worker end-to-end verification are still outstanding.
-
-
-## Watchdog and outbox fencing (stage 5; pending integration verification)
-
-`app.watchdog.watchdog_once()` scans attempts with status `sending`/`waiting` and an expired `deadline_at`, provided the attempt is still the task's current attempt. Each candidate is rechecked **inside the same user → task → attempt row-lock order as provider webhooks**, after the locks are acquired, before a transition is applied. Therefore concurrent watchdog processes cannot independently advance the same attempt or return its price twice. When all provider legs fail or expire, the original debit is reversed using the unique `refund:{task_id}` ledger key in the same transaction as terminal failure.
-
-A provider completion that arrives **after the task is terminal or its attempt is superseded** is ignored. An already-arrived successful result that wins the row lock before watchdog processing may complete normally even if its deadline has just elapsed; the scan does not retroactively undo completed work. A technical timeout allows the next compatible leg.
-
-The worker now scans for expired attempts periodically (`WATCHDOG_INTERVAL_SECONDS`, default 2), as well as dispatching outbox events. Claims use `FOR UPDATE SKIP LOCKED` with a timestamp lease; the claim's expiration timestamp is passed to `finish_outbox()` as an ownership token. Old workers cannot mark events done when the lease has been renewed by a different worker. Retried dispatches retain their original provider deadline, and already-waiting attempts are not resent by ordinary outbox replay.
-
-The simulator's `late_success` and `no_webhook` modes support manual end-to-end testing. Stage-five tests cover first-leg timeout → second-leg success, concurrent watchdog scans exhausting both legs → exactly one refund, ignoring a late completed callback after refund, and rejection of a stale outbox acknowledgement.
-
-**Limitations:** provider submission is at-least-once on ambiguous transport failure. The fake provider is not durable across a process restart; its stable external ID is necessary but does not by itself make simulated submission fully idempotent. Four independent Uvicorn-worker networking and actual process-kill/restart tests remain stage six.
-
-
-## Stage 6: isolated live-network E2E
-
-Run this from the project root on Windows, with Docker Desktop running and Python HTTPX installed:
+### End-to-end: настоящая сеть, четыре API-процесса, два worker
 
 ```powershell
-git pull origin feat/generation-service
 docker compose -f compose.e2e.yaml -p integer-e2e up --build -d
 .\.venv\Scripts\python.exe tests/e2e_live.py
 docker compose -f compose.e2e.yaml -p integer-e2e down
 ```
 
-The separate Compose file **does not use the development database**: it creates its own project, ephemeral `integer_e2e` PostgreSQL, API listening on `127.0.0.1:18000`, and fake providers on `127.0.0.1:18101` and `127.0.0.1:18102`. The test controls are enabled **only** in this E2E environment; the ordinary app does not expose them. The E2E database is discarded when the container stops; never run this suite against data you need to keep.
+E2E использует **собственную временную БД PostgreSQL** и локальные порты
+`18000` (API), `18101` (alpha), `18102` (beta). Сценарий проверяет
+20 параллельных оплат, success/failover/timeout, сохранение outbox при
+остановке worker, два одновременно запущенных worker, двойные callback
+и контрольный баланс. Для повторного запуска создайте свежий E2E-контур:
+скрипт предполагает пустую базу.
 
-The E2E driver sends **20 concurrent payment webhooks through the real HTTP server**, verifies one credit, checks a normal Alpha completion and technical Alpha → Beta failover, then triggers no-callback timeout with automatic refund. It stops the worker, creates a task while the worker is offline, starts it again and checks that the queued event is processed. Finally, it scales to two worker containers, sends three simultaneous generation requests with concurrent duplicate callbacks, and verifies the resulting balance.
+### Известные ограничения
 
-The API container starts Uvicorn with **four processes**; the E2E checks traverse the real published endpoint. This tests the multi-process service but does not establish that every request hit a distinct API process; explicit process-kill and crash-recovery exercises remain to be performed. The E2E script currently requires a fresh E2E database and is not designed for rerunning in parallel.
-
-Provider simulator settings: `FAKE_PROVIDER_FAILURE_RATE` and `FAKE_PROVIDER_FAILURE_TYPE` enable randomized failure with `FAKE_PROVIDER_MODE=random`; `FAKE_PROVIDER_MODE` also supports fixed outcomes such as `technical`, `payload`, `moderation`, `no_webhook`, `late_success`, `duplicate`, and synchronous HTTP failures. The fake providers keep accepted job IDs in memory so repeated submissions to the same running simulator do not start a second callback. Provider-process restarts still lose this state, which is a known limit of the simulator rather than a proven exactly-once remote execution guarantee.
-
-**E2E status:** source has been committed, but these tests have not yet been executed on Docker. Collect stdout and `docker compose -f compose.e2e.yaml -p integer-e2e logs --tail=100` for any failures. Continue to run `ruff check .`, `ruff format --check .` and `pyright` before delivery.
+- `GET /users/{id}/balance` выполняет два запроса под стандартным
+  `READ COMMITTED`: под высокой конкуренцией баланс и последние проводки
+  теоретически могут относиться к разным снимкам.
+- Фейковый провайдер использует in-memory список задач и
+  FastAPI BackgroundTasks. После аварийного рестарта провайдера
+  невыполненный callback может пропасть; watchdog завершит попытку.
+- Тест перезапуска worker подтверждает восстановление **ожидающего**
+  события outbox, а не все возможные моменты падения при внешнем HTTP.
+- Журнал тестов и E2E прогонов не является гарантией отсутствия всех
+  редких гонок при реальной эксплуатации.
