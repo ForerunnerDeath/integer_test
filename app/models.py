@@ -168,7 +168,7 @@ class OutboxEvent(Base):
     )
     event_key: Mapped[str] = mapped_column(String(160), unique=True, nullable=False)
     topic: Mapped[str] = mapped_column(String(80), nullable=False)
-    payload: Mapped[dict] = mapped_column(JSON, nullable=False)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
     available_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
