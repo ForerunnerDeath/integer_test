@@ -4,6 +4,7 @@ import asyncio
 import logging
 import uuid
 from datetime import UTC, datetime, timedelta
+from typing import TypedDict
 
 import httpx
 from sqlalchemy import func, or_, select
@@ -22,6 +23,14 @@ from app.provider_flow import ProviderWebhook, transition_attempt
 from app.watchdog import watchdog_once
 
 log = logging.getLogger(__name__)
+
+
+class ProviderRequestBody(TypedDict):
+    task_id: str
+    attempt_id: str
+    model_slug: str
+    prompt: str
+    ref_images: list[str]
 
 
 async def claim_outbox() -> tuple[uuid.UUID, datetime] | None:
@@ -91,7 +100,7 @@ async def dispatch_attempt(attempt_id: uuid.UUID, client: httpx.AsyncClient) -> 
             task.status = TaskStatus.processing
             base_url = settings.alpha_url if attempt.provider == "alpha" else settings.beta_url
             url = f"{base_url}/tasks"
-            body = {
+            body: ProviderRequestBody = {
                 "task_id": str(task.id),
                 "attempt_id": str(attempt.id),
                 "model_slug": model.slug,

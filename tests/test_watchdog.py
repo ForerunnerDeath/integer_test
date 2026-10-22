@@ -59,7 +59,7 @@ async def test_timeout_fallback_then_late_alpha_success_is_ignored() -> None:
         assert state["current_leg"]["provider"] == "beta"
         assert state["attempts"][0]["error_type"] == "timeout"
 
-        late = {
+        late: dict[str, object] = {
             "task_id": task_id,
             "attempt_id": first_id,
             "external_id": first_id,
@@ -73,7 +73,11 @@ async def test_timeout_fallback_then_late_alpha_success_is_ignored() -> None:
 
         second_id = state["current_leg"]["id"]
         await dispatch_and_capture(second_id)
-        completed = {**late, "attempt_id": second_id, "external_id": second_id}
+        completed: dict[str, object] = {
+            **late,
+            "attempt_id": second_id,
+            "external_id": second_id,
+        }
         raw, headers = signed_provider(completed)
         result = await client.post("/webhooks/providers/beta", content=raw, headers=headers)
         assert result.json()["outcome"] == "completed"
@@ -104,7 +108,7 @@ async def test_parallel_watchdogs_refund_once_and_reject_late_success() -> None:
         assert final["status"] == TaskStatus.failed
         assert all(attempt["status"] == "failed" for attempt in final["attempts"])
 
-        late = {
+        late: dict[str, object] = {
             "task_id": task_id,
             "attempt_id": second_id,
             "external_id": second_id,

@@ -107,7 +107,8 @@ async def test_different_payments_do_not_lose_concurrent_credits() -> None:
 async def test_duplicate_id_with_different_amount_returns_conflict() -> None:
     user_id = str(uuid.uuid4())
     original = payment(user_id, tokens=8)
-    altered = {**original, "tokens": 1000}
+    altered = original.copy()
+    altered["tokens"] = 1000
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         body, headers = signed_body(original)
         first = await client.post("/webhooks/payments", content=body, headers=headers)

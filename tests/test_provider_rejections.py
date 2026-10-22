@@ -101,7 +101,7 @@ async def test_video_moderation_skips_alpha_and_refunds() -> None:
         assert before["current_leg"]["provider"] == "beta"
         await send_to_provider(first_id, 202)
 
-        failed = {
+        failed: dict[str, object] = {
             "task_id": task_id,
             "attempt_id": first_id,
             "external_id": first_id,
@@ -133,7 +133,7 @@ async def test_video_technical_failure_uses_alpha() -> None:
         first_id = before["current_leg"]["id"]
         await send_to_provider(first_id, 202)
 
-        failed = {
+        failed: dict[str, object] = {
             "task_id": task_id,
             "attempt_id": first_id,
             "external_id": first_id,
@@ -150,7 +150,7 @@ async def test_video_technical_failure_uses_alpha() -> None:
         second_id = next_state["current_leg"]["id"]
         await send_to_provider(second_id, 202)
 
-        success = {
+        success: dict[str, object] = {
             "task_id": task_id,
             "attempt_id": second_id,
             "external_id": second_id,
@@ -178,7 +178,7 @@ async def test_wrong_provider_signature_rejected_without_transition() -> None:
         before = (await client.get(f"/tasks/{task_id}")).json()
         first_id = before["current_leg"]["id"]
         await send_to_provider(first_id, 202)
-        event = {
+        event: dict[str, object] = {
             "task_id": task_id,
             "attempt_id": first_id,
             "external_id": first_id,

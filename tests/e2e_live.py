@@ -101,7 +101,7 @@ async def main() -> None:
             )
 
         user = str(uuid.uuid4())
-        payment = {
+        payment: dict[str, object] = {
             "payment_id": uuid.uuid4().hex,
             "user_id": user,
             "tokens": 100,

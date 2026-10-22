@@ -10,11 +10,11 @@ branch_labels = None
 depends_on = None
 
 # Explicit PostgreSQL enums: create once before tables, drop once after them.
-ledger_kind = postgresql.ENUM("credit", "debit", "refund", name="ledgerkind", create_type=False)
-task_status = postgresql.ENUM(
+ledger_kind: postgresql.ENUM[str] = postgresql.ENUM("credit", "debit", "refund", name="ledgerkind", create_type=False)
+task_status: postgresql.ENUM[str] = postgresql.ENUM(
     "pending", "processing", "completed", "failed", name="taskstatus", create_type=False
 )
-attempt_status = postgresql.ENUM(
+attempt_status: postgresql.ENUM[str] = postgresql.ENUM(
     "pending", "sending", "waiting", "completed", "failed", name="attemptstatus", create_type=False
 )
 
