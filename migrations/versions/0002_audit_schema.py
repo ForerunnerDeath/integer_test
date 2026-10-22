@@ -29,7 +29,9 @@ def upgrade() -> None:
         ("outbox_events", "available_at"),
     ):
         op.alter_column(
-            table, column, existing_type=sa.DateTime(timezone=True),
+            table,
+            column,
+            existing_type=sa.DateTime(timezone=True),
             nullable=False,
         )
 
@@ -41,7 +43,9 @@ def downgrade() -> None:
         ("outbox_events", "available_at"),
     ):
         op.alter_column(
-            table, column, existing_type=sa.DateTime(timezone=True),
+            table,
+            column,
+            existing_type=sa.DateTime(timezone=True),
             nullable=True,
         )
     # Sequence values intentionally stay monotonic on downgrade.
