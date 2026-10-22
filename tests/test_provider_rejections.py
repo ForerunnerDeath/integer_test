@@ -187,9 +187,7 @@ async def test_wrong_provider_signature_rejected_without_transition() -> None:
         }
         raw, headers = signed_provider(event)
         headers["X-Signature"] = "0" * 64
-        response = await client.post(
-            "/webhooks/providers/alpha", content=raw, headers=headers
-        )
+        response = await client.post("/webhooks/providers/alpha", content=raw, headers=headers)
         state = (await client.get(f"/tasks/{task_id}")).json()
         balance = (await client.get(f"/users/{user_id}/balance")).json()
 
