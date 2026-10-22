@@ -176,9 +176,9 @@ async def dispatch_attempt(
                     ):
                         return
                 # A signed callback may already have bound a provider-issued ID.
-                if (
-                    accepted_id is not None
-                    and attempt.external_id not in (str(attempt.id), accepted_id)
+                if accepted_id is not None and attempt.external_id not in (
+                    str(attempt.id),
+                    accepted_id,
                 ):
                     return
                 if accepted_id is not None:
