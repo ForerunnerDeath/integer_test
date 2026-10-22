@@ -15,8 +15,7 @@ task_status = postgresql.ENUM(
     "pending", "processing", "completed", "failed", name="taskstatus", create_type=False
 )
 attempt_status = postgresql.ENUM(
-    "pending", "sending", "waiting", "completed", "failed",
-    name="attemptstatus", create_type=False
+    "pending", "sending", "waiting", "completed", "failed", name="attemptstatus", create_type=False
 )
 
 
@@ -53,7 +52,9 @@ def upgrade() -> None:
     op.create_table(
         "ledger_entries",
         sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True),
-        sa.Column("user_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("users.id"), nullable=False),
+        sa.Column(
+            "user_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("users.id"), nullable=False
+        ),
         sa.Column("operation_key", sa.String(160), nullable=False, unique=True),
         sa.Column("kind", ledger_kind, nullable=False),
         sa.Column("delta", sa.BigInteger(), nullable=False),
@@ -65,7 +66,9 @@ def upgrade() -> None:
     op.create_table(
         "generation_tasks",
         sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True),
-        sa.Column("user_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("users.id"), nullable=False),
+        sa.Column(
+            "user_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("users.id"), nullable=False
+        ),
         sa.Column("model_id", sa.Integer(), sa.ForeignKey("models.id"), nullable=False),
         sa.Column("prompt", sa.Text(), nullable=False),
         sa.Column("ref_images", sa.JSON(), nullable=False),
@@ -80,8 +83,10 @@ def upgrade() -> None:
         "provider_attempts",
         sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True),
         sa.Column(
-            "task_id", postgresql.UUID(as_uuid=True),
-            sa.ForeignKey("generation_tasks.id"), nullable=False,
+            "task_id",
+            postgresql.UUID(as_uuid=True),
+            sa.ForeignKey("generation_tasks.id"),
+            nullable=False,
         ),
         sa.Column("leg_id", sa.Integer(), sa.ForeignKey("model_legs.id"), nullable=False),
         sa.Column("ordinal", sa.Integer(), nullable=False),
@@ -93,13 +98,13 @@ def upgrade() -> None:
         sa.Column("finished_at", sa.DateTime(timezone=True)),
         sa.UniqueConstraint("task_id", "ordinal", name="uq_attempt_task_ordinal"),
     )
-    op.create_index(
-        "ix_attempt_status_deadline", "provider_attempts", ["status", "deadline_at"]
-    )
+    op.create_index("ix_attempt_status_deadline", "provider_attempts", ["status", "deadline_at"])
     op.create_table(
         "payments",
         sa.Column("payment_id", sa.String(160), primary_key=True),
-        sa.Column("user_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("users.id"), nullable=False),
+        sa.Column(
+            "user_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("users.id"), nullable=False
+        ),
         sa.Column("tokens", sa.BigInteger(), nullable=False),
         sa.Column("status", sa.String(30), nullable=False),
         sa.CheckConstraint("tokens > 0", name="ck_payments_positive_tokens"),
@@ -115,9 +120,7 @@ def upgrade() -> None:
         sa.Column("done_at", sa.DateTime(timezone=True)),
         sa.Column("retries", sa.Integer(), nullable=False),
     )
-    op.create_index(
-        "ix_outbox_available", "outbox_events", ["done_at", "available_at"]
-    )
+    op.create_index("ix_outbox_available", "outbox_events", ["done_at", "available_at"])
 
     model_table = sa.table(
         "models",
@@ -145,20 +148,36 @@ def upgrade() -> None:
         leg_table,
         [
             {
-                "id": 1, "model_id": 1, "provider": "alpha",
-                "priority": 1, "max_ref_images": 4, "skip_on_moderation": False,
+                "id": 1,
+                "model_id": 1,
+                "provider": "alpha",
+                "priority": 1,
+                "max_ref_images": 4,
+                "skip_on_moderation": False,
             },
             {
-                "id": 2, "model_id": 1, "provider": "beta",
-                "priority": 2, "max_ref_images": 10, "skip_on_moderation": False,
+                "id": 2,
+                "model_id": 1,
+                "provider": "beta",
+                "priority": 2,
+                "max_ref_images": 10,
+                "skip_on_moderation": False,
             },
             {
-                "id": 3, "model_id": 2, "provider": "beta",
-                "priority": 1, "max_ref_images": 2, "skip_on_moderation": False,
+                "id": 3,
+                "model_id": 2,
+                "provider": "beta",
+                "priority": 1,
+                "max_ref_images": 2,
+                "skip_on_moderation": False,
             },
             {
-                "id": 4, "model_id": 2, "provider": "alpha",
-                "priority": 2, "max_ref_images": 1, "skip_on_moderation": True,
+                "id": 4,
+                "model_id": 2,
+                "provider": "alpha",
+                "priority": 2,
+                "max_ref_images": 1,
+                "skip_on_moderation": True,
             },
         ],
     )
