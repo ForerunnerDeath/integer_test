@@ -97,7 +97,18 @@ async def transition_attempt(
             ):
                 return "ignored"
             if attempt.external_id != callback.external_id:
-                raise HTTPException(status_code=409, detail="Provider task ID mismatch")
+                # Providers may callback before their HTTP 202 reaches us.
+                # The signed callback establishes the provider-issued ID while
+                # the attempt is still sending; a waiting ID is immutable.
+                if (
+                    dispatch_lease is None
+                    and attempt.status == AttemptStatus.sending
+                    and attempt.external_id in (None, str(attempt.id))
+                    and 0 < len(callback.external_id) <= 160
+                ):
+                    attempt.external_id = callback.external_id
+                else:
+                    raise HTTPException(status_code=409, detail="Provider task ID mismatch")
 
             # A worker's synchronous HTTP outcome is valid only while it owns
             # the outbox lease. Signed provider callbacks do not use this guard.
