@@ -1,6 +1,6 @@
 # Integer generation service
 
-**Status: stage 3 — generation admission, debit, and transactional outbox implemented; provider dispatch and completion remain unimplemented. Not ready for submission.**
+**Status: stage 4 — provider simulator, signed callbacks, failover, and outbox worker added. Watchdog/reconciliation remain unfinished. Not ready for submission.**
 
 ## Quick start
 
@@ -72,7 +72,7 @@ The Docker integration tests cover 20 simultaneous identical payments, 12 differ
 1. Scaffold/schema (**done**).
 2. Signed payment webhook and concurrency-safe ledger (**done**).\n2.5. Frozen migration, shared ledger and isolated DB tests (**done; 10 integration tests passed**).
 3. Generation API and transactional debit (**implemented; awaiting integration verification**).
-4. Provider routing and callbacks.
+4. Provider routing and callbacks (**implemented; local verification required**).
 5. Watchdog, timeout recovery, and once-only refunds.
 6. Comprehensive multi-worker race/crash tests.
 7. Code review and documentation.
@@ -89,6 +89,19 @@ Run `docker compose run --build --rm tests` to recreate the test database, run m
 
 The service first validates the model and finds the first eligible provider leg in priority order; no matching leg returns 400 without debiting. It then locks the user's row, counts active (pending/processing) tasks and enforces a maximum of three (429), then debits the model price (402 when insufficient funds). In **one PostgreSQL transaction** it commits the debit journal entry, generation task, first provider attempt and outbox dispatch event. Nothing is sent over the network while holding the transaction. Concurrent submissions for one user serialize on that user's row lock. A missing user is treated as insufficient funds (402), since no registration endpoint is in scope.
 
-**Important:** the worker, provider HTTP requests, provider webhooks, timeout watchdog and refunds remain to be implemented. An accepted generation remains pending until that functionality is added. The outbox event is durable but not yet consumed. `POST /generate` has no client-provided idempotency key in the assignment; retries intentionally create new tasks and spend again if otherwise eligible.
+**Important:** the outbox worker, fake provider HTTP requests, provider webhooks and terminal refunds are now implemented. The watchdog, stuck-event recovery policies and crash/retry verification are not yet complete. `POST /generate` has no client-provided idempotency key in the assignment; retries intentionally create new tasks and spend again if otherwise eligible.
 
 New PostgreSQL tests validate initial task/attempt/outbox creation, eligible leg selection and rejection, 10 simultaneous submissions respecting the active-task limit, five concurrent submissions with funds for just one, and no debit on rejected generation.
+
+
+## Provider lifecycle (stage 4; pending local integration verification)
+
+The worker claims ready outbox events with PostgreSQL `FOR UPDATE SKIP LOCKED` and a lease, then submits `POST /tasks` to Alpha or Beta. A stable attempt UUID is sent as the provider's external task ID; the simulator treats this identifier as its idempotency key. The worker **does not hold task-row locks while making HTTP requests**.
+
+Fake provider services read these optional environment variables (configure under each provider's Compose `environment`): `FAKE_PROVIDER_MODE` (`success`, `technical`, `moderation`, `payload`, `duplicate`, `no_webhook`, `late_success`, `http_500`, `http_503`, `http_400`, `http_403`, or `timeout`) and `FAKE_PROVIDER_DELAY` (default two seconds). They accept `POST /tasks`, return HTTP 202 with the stable `external_id`, and send a signed callback to `/webhooks/providers/{name}`.
+
+Provider callbacks sign the **unmodified JSON bytes** with `PROVIDER_WEBHOOK_SECRET` and supply a hex HMAC in `X-Signature`. Completed callbacks persist their result URL. Technical failures advance to the next suitable leg; moderation failures skip legs marked `skip_on_moderation`; payload errors terminate immediately. Once all available legs fail, the task transitions to failed and the shared ledger refunds its price within the same transaction. Duplicate, superseded and late callbacks cannot change a terminal task or grant a second refund. The provider simulator and integration tests use this agreed callback schema; it is not a public external API standard.
+
+The new integration tests cover successful delivery with simultaneous duplicate callbacks, technical failover to the next provider with ignored late results, and ten simultaneous final-failure callbacks resulting in exactly one refund. **These new tests and the linters still need to run in the user's Docker/local environment.**
+
+Caveats: the worker uses a leased outbox event, but dispatch-after-crash may be attempted again, requiring provider-side idempotency. The fake provider uses FastAPI BackgroundTasks, not durable job storage, and its scheduled callback can disappear on a provider process restart. The stage-five watchdog will resolve attempts that have received no callback, along with late results after timeout. The initial lease timeout and dispatch retry behavior will also be hardened and tested there.
