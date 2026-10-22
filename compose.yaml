@@ -11,6 +11,28 @@ services:
       interval: 3s
       retries: 20
     volumes: ["pgdata:/var/lib/postgresql/data"]
+  test-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: integer
+      POSTGRES_PASSWORD: integer
+      POSTGRES_DB: integer_test
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U integer -d integer_test"]
+      interval: 3s
+      retries: 20
+    tmpfs:
+      - /var/lib/postgresql/data
+    profiles: ["test"]
+  test-migrate:
+    build: .
+    environment:
+      DATABASE_URL: postgresql+asyncpg://integer:integer@test-db:5432/integer_test
+    depends_on:
+      test-db:
+        condition: service_healthy
+    command: ["alembic", "upgrade", "head"]
+    profiles: ["test"]
   migrate:
     build: .
     env_file: .env
@@ -52,8 +74,9 @@ services:
     env_file: .env
     environment:
       RUN_DB_TESTS: "1"
+      DATABASE_URL: postgresql+asyncpg://integer:integer@test-db:5432/integer_test
     depends_on:
-      migrate:
+      test-migrate:
         condition: service_completed_successfully
     command: ["pytest", "-q"]
     profiles: ["test"]
