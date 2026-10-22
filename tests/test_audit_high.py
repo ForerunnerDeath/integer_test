@@ -13,12 +13,12 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
 from test_generation import fund
 from test_provider_flow import generate, signed_provider
+from test_payments import signed_body
 
-from app.config import settings
 from app.db import engine, session_factory
 from app.ledger import MAX_BALANCE
 from app.main import app
-from app.models import GenerationTask, OutboxEvent, TaskStatus
+from app.models import OutboxEvent, TaskStatus
 from app.worker import claim_outbox, dispatch_attempt
 
 pytestmark = pytest.mark.skipif(
@@ -47,8 +47,6 @@ async def test_pending_refund_headroom_blocks_credit_at_bigint_limit() -> None:
             "tokens": 2,
             "status": "completed",
         }
-        from test_payments import signed_body
-
         raw, headers = signed_body(payment)
         rejected = await api.post("/webhooks/payments", content=raw, headers=headers)
         assert rejected.status_code == 409
@@ -96,8 +94,6 @@ async def test_stale_http_timeout_cannot_overrule_newer_accepted_202() -> None:
         task_id = await generate(api, user_id)
         task = (await api.get(f"/tasks/{task_id}")).json()
         attempt_id = uuid.UUID(task["current_leg"]["id"])
-        event_id = uuid.UUID(task["current_leg"]["id"])
-
         async with session_factory() as session:
             event = await session.scalar(
                 select(OutboxEvent).where(
@@ -106,6 +102,8 @@ async def test_stale_http_timeout_cannot_overrule_newer_accepted_202() -> None:
             )
             assert event is not None
             event_id = event.id
+            event.available_at = datetime.now(UTC) - timedelta(days=1)
+            await session.commit()
 
         initial = await claim_outbox()
         assert initial is not None
