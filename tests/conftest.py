@@ -41,6 +41,8 @@ async def isolate_postgres_test_data() -> AsyncIterator[None]:
             )
         yield
     finally:
-        # Existing test fixtures dispose pooled asyncpg connections between
-        # event loops. Leave disposal to them; clean the next test on entry.
-        pass
+        # pytest-asyncio may create a new event loop for every test, including
+        # synchronous tests that only execute this autouse fixture. Pooled
+        # asyncpg connections belong to their original loop and must be
+        # disposed before that loop closes.
+        await engine.dispose()
