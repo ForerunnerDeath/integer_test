@@ -12,8 +12,8 @@ import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
 from test_generation import fund
-from test_provider_flow import generate, signed_provider
 from test_payments import signed_body
+from test_provider_flow import generate, signed_provider
 
 from app.db import engine, session_factory
 from app.ledger import MAX_BALANCE
