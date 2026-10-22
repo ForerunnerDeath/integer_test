@@ -1,5 +1,6 @@
 import enum
 import uuid
+from typing import Any
 from datetime import datetime
 from sqlalchemy import BigInteger, Boolean, CheckConstraint, DateTime, Enum, ForeignKey, Index, Integer, JSON, String, Text, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import UUID
@@ -67,7 +68,7 @@ class GenerationTask(Base):
     user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), nullable=False)
     model_id: Mapped[int] = mapped_column(ForeignKey("models.id"), nullable=False)
     prompt: Mapped[str] = mapped_column(Text, nullable=False)
-    ref_images: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    ref_images: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
     price: Mapped[int] = mapped_column(Integer, nullable=False)
     status: Mapped[TaskStatus] = mapped_column(Enum(TaskStatus), nullable=False, default=TaskStatus.pending)
     current_attempt_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
@@ -102,7 +103,7 @@ class OutboxEvent(Base):
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uid)
     event_key: Mapped[str] = mapped_column(String(160), unique=True, nullable=False)
     topic: Mapped[str] = mapped_column(String(80), nullable=False)
-    payload: Mapped[dict] = mapped_column(JSON, nullable=False)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
     available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     claimed_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     done_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
