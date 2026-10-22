@@ -58,7 +58,12 @@ async def claim_outbox() -> tuple[uuid.UUID, datetime] | None:
             return event.id, leased_until
 
 
-async def dispatch_attempt(attempt_id: uuid.UUID, client: httpx.AsyncClient) -> None:
+async def dispatch_attempt(
+    attempt_id: uuid.UUID,
+    client: httpx.AsyncClient,
+    *,
+    dispatch_lease: tuple[uuid.UUID, datetime] | None = None,
+) -> None:
     """Persist the stable provider id before HTTP; callbacks may arrive early."""
     async with session_factory() as session:
         async with session.begin():
@@ -135,6 +140,7 @@ async def dispatch_attempt(attempt_id: uuid.UUID, client: httpx.AsyncClient) -> 
                 error_type=failure,
             ),
             provider,
+            dispatch_lease=dispatch_lease,
         )
         return
 
@@ -152,6 +158,17 @@ async def dispatch_attempt(attempt_id: uuid.UUID, client: httpx.AsyncClient) -> 
                 select(ProviderAttempt).where(ProviderAttempt.id == attempt_id).with_for_update()
             )
             if attempt is not None and attempt.status == AttemptStatus.sending:
+                if dispatch_lease is not None:
+                    event_id, expected_until = dispatch_lease
+                    event = await session.get(OutboxEvent, event_id, with_for_update=True)
+                    if (
+                        event is None
+                        or event.done_at is not None
+                        or event.claimed_until != expected_until
+                        or expected_until <= datetime.now(UTC)
+                        or event.payload.get("attempt_id") != str(attempt.id)
+                    ):
+                        return
                 attempt.status = AttemptStatus.waiting
 
 
@@ -187,7 +204,9 @@ async def process_one(client: httpx.AsyncClient) -> bool:
             if event.topic != "dispatch_attempt":
                 raise ValueError(f"Unsupported outbox topic: {event.topic}")
             attempt_id = uuid.UUID(str(event.payload["attempt_id"]))
-        await dispatch_attempt(attempt_id, client)
+        await dispatch_attempt(
+            attempt_id, client, dispatch_lease=(event_id, lease_until)
+        )
     except Exception:
         log.exception("Outbox dispatch failed for %s", event_id)
         await finish_outbox(event_id, lease_until, success=False)
