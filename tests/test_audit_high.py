@@ -41,7 +41,7 @@ async def test_pending_refund_headroom_blocks_credit_at_bigint_limit() -> None:
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as api:
         await fund(api, user_id, MAX_BALANCE)
         task_id = await generate(api, user_id)
-        payment = {
+        payment: dict[str, object] = {
             "payment_id": uuid.uuid4().hex,
             "user_id": user_id,
             "tokens": 2,
@@ -80,9 +80,7 @@ async def failed_callback(api: AsyncClient, task_id: str, attempt_id: str, provi
         "error_type": "technical",
     }
     raw, headers = signed_provider(payload)
-    result = await api.post(
-        f"/webhooks/providers/{provider}", content=raw, headers=headers
-    )
+    result = await api.post(f"/webhooks/providers/{provider}", content=raw, headers=headers)
     assert result.status_code == 200
 
 
@@ -96,9 +94,7 @@ async def test_stale_http_timeout_cannot_overrule_newer_accepted_202() -> None:
         attempt_id = uuid.UUID(task["current_leg"]["id"])
         async with session_factory() as session:
             event = await session.scalar(
-                select(OutboxEvent).where(
-                    OutboxEvent.event_key == f"dispatch:{attempt_id}"
-                )
+                select(OutboxEvent).where(OutboxEvent.event_key == f"dispatch:{attempt_id}")
             )
             assert event is not None
             event_id = event.id
