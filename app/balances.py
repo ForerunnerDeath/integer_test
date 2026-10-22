@@ -5,7 +5,8 @@ from datetime import datetime
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import select, text
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import session_factory
 from app.models import LedgerEntry, LedgerKind, User
@@ -30,24 +31,32 @@ class BalanceResponse(BaseModel):
 @router.get("/users/{user_id}/balance", response_model=BalanceResponse)
 async def user_balance(user_id: uuid.UUID) -> BalanceResponse:
     async with session_factory() as session:
-        user = await session.get(User, user_id)
-        if user is None:
-            raise HTTPException(status_code=404, detail="User not found")
+        async with session.begin():
+            # Both reads must observe the same committed PostgreSQL snapshot.
+            # SET TRANSACTION must be the first SQL statement in this transaction.
+            await session.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ"))
+            return await _read_balance(session, user_id)
 
-        result = await session.scalars(
-            select(LedgerEntry)
-            .where(LedgerEntry.user_id == user_id)
-            .order_by(LedgerEntry.created_at.desc(), LedgerEntry.id.desc())
-            .limit(20)
+
+async def _read_balance(session: AsyncSession, user_id: uuid.UUID) -> BalanceResponse:
+    user = await session.get(User, user_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    result = await session.scalars(
+        select(LedgerEntry)
+        .where(LedgerEntry.user_id == user_id)
+        .order_by(LedgerEntry.created_at.desc(), LedgerEntry.id.desc())
+        .limit(20)
+    )
+    operations = [
+        LedgerEntryResponse(
+            operation_key=entry.operation_key,
+            kind=entry.kind,
+            delta=entry.delta,
+            balance_after=entry.balance_after,
+            created_at=entry.created_at,
         )
-        operations = [
-            LedgerEntryResponse(
-                operation_key=entry.operation_key,
-                kind=entry.kind,
-                delta=entry.delta,
-                balance_after=entry.balance_after,
-                created_at=entry.created_at,
-            )
-            for entry in result
-        ]
-        return BalanceResponse(user_id=user_id, balance=user.balance, operations=operations)
+        for entry in result
+    ]
+    return BalanceResponse(user_id=user_id, balance=user.balance, operations=operations)
