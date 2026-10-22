@@ -1,8 +1,8 @@
 """Watchdog timeout recovery and outbox lease fencing against real PostgreSQL."""
 
 import asyncio
-import uuid
 import os
+import uuid
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 
