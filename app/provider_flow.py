@@ -23,7 +23,7 @@ from app.models import (
 from app.security import verify_webhook_signature
 
 router = APIRouter(tags=["provider-webhooks"])
-ErrorType = Literal["technical", "moderation", "payload"]
+ErrorType = Literal["technical", "moderation", "payload", "timeout"]
 ResultStatus = Literal["completed", "failed"]
 TransitionResult = Literal["completed", "advanced", "failed", "ignored"]
 
@@ -52,6 +52,8 @@ class ProviderWebhookResponse(BaseModel):
 async def transition_attempt(
     callback: ProviderWebhook,
     provider: str,
+    *,
+    timeout_only: bool = False,
 ) -> TransitionResult:
     """Resolve a provider attempt under database locks across API processes.
 
@@ -71,7 +73,7 @@ async def transition_attempt(
             if relation is None or relation.task_id != callback.task_id:
                 raise HTTPException(status_code=404, detail="Attempt not found")
 
-            await locked_user(session, relation.user_id)
+            user = await locked_user(session, relation.user_id)
             task = await session.scalar(
                 select(GenerationTask)
                 .where(GenerationTask.id == callback.task_id)
@@ -95,6 +97,13 @@ async def transition_attempt(
                 return "ignored"
             if attempt.external_id != callback.external_id:
                 raise HTTPException(status_code=409, detail="Provider task ID mismatch")
+
+            # A scan can become stale while waiting for row locks. The
+            # deadline must still be expired after the locks are acquired.
+            if timeout_only and (
+                attempt.deadline_at is None or attempt.deadline_at > datetime.now(UTC)
+            ):
+                return "ignored"
 
             attempt.finished_at = datetime.now(UTC)
             if callback.status == "completed":
@@ -151,7 +160,6 @@ async def transition_attempt(
 
             # All routes exhausted or invalid payload: refund atomically with
             # the terminal transition, so retrying an identical callback is safe.
-            user = await locked_user(session, task.user_id)
             await record_movement(
                 session,
                 user,

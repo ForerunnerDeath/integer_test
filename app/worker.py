@@ -19,12 +19,13 @@ from app.models import (
     TaskStatus,
 )
 from app.provider_flow import ProviderWebhook, transition_attempt
+from app.watchdog import watchdog_once
 
 log = logging.getLogger(__name__)
 LEASE_SECONDS = 30
 
 
-async def claim_outbox() -> uuid.UUID | None:
+async def claim_outbox() -> tuple[uuid.UUID, datetime] | None:
     async with session_factory() as session:
         async with session.begin():
             event = await session.scalar(
@@ -43,9 +44,10 @@ async def claim_outbox() -> uuid.UUID | None:
             )
             if event is None:
                 return None
-            event.claimed_until = datetime.now(UTC) + timedelta(seconds=LEASE_SECONDS)
+            leased_until = datetime.now(UTC) + timedelta(seconds=LEASE_SECONDS)
+            event.claimed_until = leased_until
             event.retries += 1
-            return event.id
+            return event.id, leased_until
 
 
 async def dispatch_attempt(attempt_id: uuid.UUID, client: httpx.AsyncClient) -> None:
@@ -137,11 +139,21 @@ async def dispatch_attempt(attempt_id: uuid.UUID, client: httpx.AsyncClient) -> 
                 attempt.status = AttemptStatus.waiting
 
 
-async def finish_outbox(event_id: uuid.UUID, *, success: bool) -> None:
+async def finish_outbox(
+    event_id: uuid.UUID,
+    lease_until: datetime,
+    *,
+    success: bool,
+) -> None:
+    """Only the current lease holder may acknowledge or retry an event."""
     async with session_factory() as session:
         async with session.begin():
             event = await session.get(OutboxEvent, event_id, with_for_update=True)
-            if event is None:
+            if (
+                event is None
+                or event.done_at is not None
+                or event.claimed_until != lease_until
+            ):
                 return
             event.claimed_until = None
             if success:
@@ -151,9 +163,10 @@ async def finish_outbox(event_id: uuid.UUID, *, success: bool) -> None:
 
 
 async def process_one(client: httpx.AsyncClient) -> bool:
-    event_id = await claim_outbox()
-    if event_id is None:
+    claim = await claim_outbox()
+    if claim is None:
         return False
+    event_id, lease_until = claim
     try:
         async with session_factory() as session:
             event = await session.get(OutboxEvent, event_id)
@@ -165,16 +178,24 @@ async def process_one(client: httpx.AsyncClient) -> bool:
         await dispatch_attempt(attempt_id, client)
     except Exception:
         log.exception("Outbox dispatch failed for %s", event_id)
-        await finish_outbox(event_id, success=False)
+        await finish_outbox(event_id, lease_until, success=False)
     else:
-        await finish_outbox(event_id, success=True)
+        await finish_outbox(event_id, lease_until, success=True)
     return True
 
 
 async def main() -> None:
     logging.basicConfig(level=logging.INFO)
+    loop = asyncio.get_running_loop()
+    next_watchdog_at = 0.0
     async with httpx.AsyncClient() as client:
         while True:
+            if loop.time() >= next_watchdog_at:
+                try:
+                    await watchdog_once()
+                except Exception:
+                    log.exception("Watchdog scan failed")
+                next_watchdog_at = loop.time() + max(0.1, settings.watchdog_interval_seconds)
             if not await process_one(client):
                 await asyncio.sleep(0.5)
 
