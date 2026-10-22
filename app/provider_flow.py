@@ -54,6 +54,7 @@ async def transition_attempt(
     provider: str,
     *,
     timeout_only: bool = False,
+    dispatch_lease: tuple[uuid.UUID, datetime] | None = None,
 ) -> TransitionResult:
     """Resolve a provider attempt under database locks across API processes.
 
@@ -97,6 +98,20 @@ async def transition_attempt(
                 return "ignored"
             if attempt.external_id != callback.external_id:
                 raise HTTPException(status_code=409, detail="Provider task ID mismatch")
+
+            # A worker's synchronous HTTP outcome is valid only while it owns
+            # the outbox lease. Signed provider callbacks do not use this guard.
+            if dispatch_lease is not None:
+                event_id, expected_until = dispatch_lease
+                event = await session.get(OutboxEvent, event_id, with_for_update=True)
+                if (
+                    event is None
+                    or event.done_at is not None
+                    or event.claimed_until != expected_until
+                    or expected_until <= datetime.now(UTC)
+                    or event.payload.get("attempt_id") != str(attempt.id)
+                ):
+                    return "ignored"
 
             # A scan can become stale while waiting for row locks. The
             # deadline must still be expired after the locks are acquired.
