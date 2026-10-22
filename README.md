@@ -1,6 +1,6 @@
 # Integer generation service
 
-**Status: stage 2 — payment ledger and webhook completed in code; generation and provider orchestration are not yet implemented. Not ready for submission.**
+**Status: stage 2.5 — frozen initial migration, shared token ledger, isolated PostgreSQL tests. Generation and provider orchestration are not yet implemented. Not ready for submission.**
 
 ## Quick start
 
@@ -11,7 +11,7 @@ docker compose run --build --rm tests
 ```
 
 In PowerShell use `Copy-Item .env.example .env` instead of `cp`.
-The Docker test service runs integration tests against **real PostgreSQL**, not a fake store, and sets `RUN_DB_TESTS=1`.
+The Docker test service runs integration tests against an **isolated ephemeral PostgreSQL container** (`test-db`), not the development database, and sets `RUN_DB_TESTS=1`. The `test-migrate` service applies the complete migration chain to this fresh database. The test database is discarded when the test container is removed; it is not persistent.
 Without that flag, host-side `pytest` skips DB-dependent integration tests; pure API and signature tests still run.
 
 - API: http://localhost:8000/docs
@@ -45,7 +45,7 @@ The API verifies the signature before interpreting the message. A single Postgre
 3. Inserts the external payment with unique `payment_id` (`ON CONFLICT DO NOTHING RETURNING`).
 4. **Only for the winner:** increases the user's cached balance and inserts one ledger entry with a deterministic unique operation key.
 
-The payment, balance and ledger commit or roll back **together**. If a process crashes before commit, PostgreSQL rolls back all changes; a retry may complete. If it crashes after commit but before replying, a retry sees the existing payment and does not credit again. Different simultaneous payments for the same user are serialized, so none can overwrite another's balance. The full set of future balance debit/refund flows must use the same locking convention.
+The shared `app/ledger.py` module enforces signed movement direction, non-negative balance, and PostgreSQL BIGINT bounds. Debit/refund flows must call this service inside their own transaction with a locked user. The payment, balance and ledger commit or roll back **together**. If a process crashes before commit, PostgreSQL rolls back all changes; a retry may complete. If it crashes after commit but before replying, a retry sees the existing payment and does not credit again. Different simultaneous payments for the same user are serialized, so none can overwrite another's balance. The full set of future balance debit/refund flows must use the same locking convention.
 
 ## Migrations and seed data
 
@@ -53,7 +53,7 @@ The payment, balance and ledger commit or roll back **together**. If a process c
 - `image-fast`, price 2, alpha(max 4) → beta(max 10).
 - `video-long`, price 25, beta(max 2) → alpha(max 1, skip_on_moderation).
 
-For a new schema change, create `alembic revision -m "reason"`, implement explicit `upgrade()` and `downgrade()` operations, and run `alembic upgrade head`. The first migration uses SQLAlchemy metadata schema creation; later migrations should use explicit Alembic operations.
+For a new schema change, create `alembic revision -m "reason"`, implement explicit `upgrade()` and `downgrade()` operations, and run `alembic upgrade head`. The first migration uses explicit Alembic operations so later ORM edits cannot change historical migrations. It preserves the initial schema and revision ID; databases already migrated at that revision need no schema changes. Subsequent schema changes must be new revisions; never edit historical migrations after the assignment is deployed.
 
 ## Tests and developer checks
 
@@ -70,7 +70,7 @@ The Docker integration tests cover 20 simultaneous identical payments, 12 differ
 ## Development stages
 
 1. Scaffold/schema (**done**).
-2. Signed payment webhook and concurrency-safe ledger (**implemented; awaiting local PostgreSQL verification**).
+2. Signed payment webhook and concurrency-safe ledger (**8 tests passed locally on PostgreSQL**).\n2.5. Frozen migration, shared ledger and isolated DB tests (**implemented; pending local verification**).
 3. Generation API and transactional debit.
 4. Provider routing and callbacks.
 5. Watchdog, timeout recovery, and once-only refunds.
@@ -78,3 +78,7 @@ The Docker integration tests cover 20 simultaneous identical payments, 12 differ
 7. Code review and documentation.
 
 Provider result ingestion, timeout recovery and refunds are not implemented yet. Their guarantees will be documented after implementation.
+
+### Stage 2.5 verification
+
+Run `docker compose run --build --rm tests` to recreate the test database, run migrations from zero and execute integration tests. Validate with Ruff and Pyright before treating this stage as finished. The read endpoint currently performs separate balance/ledger queries; consistent read snapshots and true process-kill tests remain future hardening items.
