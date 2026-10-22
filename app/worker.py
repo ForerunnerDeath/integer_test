@@ -54,6 +54,18 @@ async def dispatch_attempt(attempt_id: uuid.UUID, client: httpx.AsyncClient) -> 
     """Persist the stable provider id before HTTP; callbacks may arrive early."""
     async with session_factory() as session:
         async with session.begin():
+            relation = await session.scalar(
+                select(ProviderAttempt.task_id).where(ProviderAttempt.id == attempt_id)
+            )
+            if relation is None:
+                raise ValueError("Dispatch refers to a missing attempt")
+            task = await session.scalar(
+                select(GenerationTask)
+                .where(GenerationTask.id == relation)
+                .with_for_update()
+            )
+            if task is None:
+                raise ValueError("Dispatch refers to a missing task")
             attempt = await session.scalar(
                 select(ProviderAttempt)
                 .where(ProviderAttempt.id == attempt_id)
@@ -61,9 +73,6 @@ async def dispatch_attempt(attempt_id: uuid.UUID, client: httpx.AsyncClient) -> 
             )
             if attempt is None:
                 raise ValueError("Dispatch refers to a missing attempt")
-            task = await session.get(GenerationTask, attempt.task_id)
-            if task is None:
-                raise ValueError("Dispatch refers to a missing task")
             if (
                 task.current_attempt_id != attempt.id
                 or task.status in (TaskStatus.completed, TaskStatus.failed)
@@ -79,7 +88,8 @@ async def dispatch_attempt(attempt_id: uuid.UUID, client: httpx.AsyncClient) -> 
                 seconds=settings.provider_timeout
             )
             task.status = TaskStatus.processing
-            url = f"{settings.alpha_url if attempt.provider == 'alpha' else settings.beta_url}/tasks"
+            base_url = settings.alpha_url if attempt.provider == "alpha" else settings.beta_url
+            url = f"{base_url}/tasks"
             body = {
                 "task_id": str(task.id),
                 "attempt_id": str(attempt.id),
@@ -88,7 +98,7 @@ async def dispatch_attempt(attempt_id: uuid.UUID, client: httpx.AsyncClient) -> 
                 "ref_images": task.ref_images,
             }
             provider = attempt.provider
-            external_id = attempt.external_id
+            external_id = str(attempt.id)
 
     failure: str | None = None
     try:
@@ -119,6 +129,16 @@ async def dispatch_attempt(attempt_id: uuid.UUID, client: httpx.AsyncClient) -> 
 
     async with session_factory() as session:
         async with session.begin():
+            relation = await session.scalar(
+                select(ProviderAttempt.task_id).where(ProviderAttempt.id == attempt_id)
+            )
+            if relation is None:
+                return
+            await session.scalar(
+                select(GenerationTask)
+                .where(GenerationTask.id == relation)
+                .with_for_update()
+            )
             attempt = await session.scalar(
                 select(ProviderAttempt)
                 .where(ProviderAttempt.id == attempt_id)
