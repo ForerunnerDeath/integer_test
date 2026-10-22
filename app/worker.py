@@ -22,7 +22,6 @@ from app.provider_flow import ProviderWebhook, transition_attempt
 from app.watchdog import watchdog_once
 
 log = logging.getLogger(__name__)
-LEASE_SECONDS = 30
 
 
 async def claim_outbox() -> tuple[uuid.UUID, datetime] | None:
@@ -44,7 +43,7 @@ async def claim_outbox() -> tuple[uuid.UUID, datetime] | None:
             )
             if event is None:
                 return None
-            leased_until = datetime.now(UTC) + timedelta(seconds=LEASE_SECONDS)
+            leased_until = datetime.now(UTC) + timedelta(seconds=settings.outbox_lease_seconds)
             event.claimed_until = leased_until
             event.retries += 1
             return event.id, leased_until
