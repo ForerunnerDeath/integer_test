@@ -87,7 +87,9 @@ async def test_early_signed_callback_can_bind_provider_generated_id() -> None:
             assert result.status_code == 200, result.text
             return httpx.Response(202, json={"external_id": provider_id})
 
-        async with httpx.AsyncClient(transport=httpx.MockTransport(response_after_callback)) as client:
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(response_after_callback)
+        ) as client:
             await dispatch_attempt(uuid.UUID(attempt_id), client)
 
         task = (await api.get(f"/tasks/{task_id}")).json()
