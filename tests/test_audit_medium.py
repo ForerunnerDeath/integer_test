@@ -83,15 +83,11 @@ async def test_early_signed_callback_can_bind_provider_generated_id() -> None:
                     "result_url": "https://example.invalid/early",
                 }
             )
-            result = await api.post(
-                "/webhooks/providers/alpha", content=raw, headers=headers
-            )
+            result = await api.post("/webhooks/providers/alpha", content=raw, headers=headers)
             assert result.status_code == 200, result.text
             return httpx.Response(202, json={"external_id": provider_id})
 
-        async with httpx.AsyncClient(
-            transport=httpx.MockTransport(response_after_callback)
-        ) as client:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(response_after_callback)) as client:
             await dispatch_attempt(uuid.UUID(attempt_id), client)
 
         task = (await api.get(f"/tasks/{task_id}")).json()
@@ -105,9 +101,7 @@ async def test_seeded_sequences_accept_followup_model_and_leg() -> None:
         async with session.begin():
             model_id = (
                 await session.execute(
-                    text(
-                        "INSERT INTO models(slug, price) VALUES (:slug, 5) RETURNING id"
-                    ),
+                    text("INSERT INTO models(slug, price) VALUES (:slug, 5) RETURNING id"),
                     {"slug": f"probe-{uuid.uuid4().hex}"},
                 )
             ).scalar_one()
