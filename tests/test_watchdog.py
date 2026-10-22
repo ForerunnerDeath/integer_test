@@ -143,6 +143,19 @@ async def test_stale_outbox_lease_cannot_acknowledge_new_lease() -> None:
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         await fund(client, user_id, 10)
         task_id = await generate(client, user_id)
+        task = (await client.get(f"/tasks/{task_id}")).json()
+
+    # Prior tests can leave pending outbox events in the shared test database.
+    # Move our event to the front rather than relying on global queue emptiness.
+    async with session_factory() as session:
+        async with session.begin():
+            event = await session.scalar(
+                select(OutboxEvent).where(
+                    OutboxEvent.event_key == f"dispatch:{task['current_leg']['id']}"
+                )
+            )
+            assert event is not None
+            event.available_at = datetime.now(UTC) - timedelta(days=1)
 
     first = await claim_outbox()
     assert first is not None
