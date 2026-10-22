@@ -128,11 +128,18 @@ async def dispatch_attempt(
         elif response.status_code != 202:
             failure = "technical"
         else:
-            returned_id = response.json().get("external_id")
-            if not isinstance(returned_id, str) or not 0 < len(returned_id) <= 160:
+            payload = response.json()
+            # A valid JSON value is not necessarily a JSON object. Arrays,
+            # scalars and objects with invalid IDs are protocol failures,
+            # not unexpected worker exceptions that reschedule the outbox.
+            if not isinstance(payload, dict):
                 failure = "technical"
             else:
-                accepted_id = returned_id
+                returned_id = payload.get("external_id")
+                if not isinstance(returned_id, str) or not 0 < len(returned_id) <= 160:
+                    failure = "technical"
+                else:
+                    accepted_id = returned_id
     except (httpx.RequestError, ValueError, TypeError):
         failure = "technical"
 
