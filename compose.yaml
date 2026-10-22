@@ -7,7 +7,7 @@ services:
       POSTGRES_DB: integer
     ports: ["55432:5432"]
     healthcheck:
-      test: ["CMD-SHELL","pg_isready -U integer -d integer"]
+      test: ["CMD-SHELL", "pg_isready -U integer -d integer"]
       interval: 3s
       retries: 20
     volumes: ["pgdata:/var/lib/postgresql/data"]
@@ -17,7 +17,7 @@ services:
     depends_on:
       db:
         condition: service_healthy
-    command: ["alembic","upgrade","head"]
+    command: ["alembic", "upgrade", "head"]
   api:
     build: .
     env_file: .env
@@ -25,25 +25,37 @@ services:
       migrate:
         condition: service_completed_successfully
     ports: ["8000:8000"]
-    command: ["uvicorn","app.main:app","--host","0.0.0.0","--port","8000","--workers","4"]
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "4"]
   worker:
     build: .
     env_file: .env
     depends_on:
       migrate:
         condition: service_completed_successfully
-    command: ["python","-m","app.worker"]
+    command: ["python", "-m", "app.worker"]
   alpha:
     build: .
     env_file: .env
     environment:
       PROVIDER_NAME: alpha
-    command: ["uvicorn","app.fake_provider:app","--host","0.0.0.0","--port","8000"]
+    command: ["uvicorn", "app.fake_provider:app", "--host", "0.0.0.0", "--port", "8000"]
   beta:
     build: .
     env_file: .env
     environment:
       PROVIDER_NAME: beta
-    command: ["uvicorn","app.fake_provider:app","--host","0.0.0.0","--port","8000"]
+    command: ["uvicorn", "app.fake_provider:app", "--host", "0.0.0.0", "--port", "8000"]
+  tests:
+    build:
+      context: .
+      target: test
+    env_file: .env
+    environment:
+      RUN_DB_TESTS: "1"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    command: ["pytest", "-q"]
+    profiles: ["test"]
 volumes:
   pgdata:
