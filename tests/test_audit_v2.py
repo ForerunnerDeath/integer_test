@@ -84,9 +84,7 @@ async def test_task_status_returns_consistent_snapshot_during_failover() -> None
         async def snapshot_reader() -> TaskResponse:
             async with session_factory() as session:
                 async with session.begin():
-                    await session.execute(
-                        text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
-                    )
+                    await session.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ"))
                     row = await session.get(GenerationTask, uuid.UUID(task_id))
                     assert row is not None
                     first_read.set()
